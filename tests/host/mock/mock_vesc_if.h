@@ -114,6 +114,46 @@ void mock_eeprom_erase(void);
 /** Смоделировать отказ EEPROM. */
 void mock_eeprom_set_failing(bool failing);
 
+// ------------------------------------------- мост к VESC Tool (COMM_CUSTOM_APP_DATA)
+
+/** Зарегистрирован ли обработчик Refloat (set_app_data_handler). */
+bool mock_has_app_data_handler(void);
+
+/** Передать данные в Refloat (эквивалент COMM_CUSTOM_APP_DATA от VESC Tool). */
+void mock_app_data_to_firmware(const uint8_t *data, unsigned int len);
+
+/** Куда уходят данные, которые Refloat отправляет через send_app_data(). */
+void mock_set_app_data_sink(void (*sink)(void *ctx, const uint8_t *data, unsigned int len),
+                            void *ctx);
+
+// ------------------------------------- мост конфигурации (conf_custom_add_config)
+
+/** Зарегистрировал ли Refloat свою конфигурацию. */
+bool mock_has_custom_config(void);
+
+/** Текущая или дефолтная конфигурация Refloat. Возвращает длину или -1. */
+int mock_custom_config_get(uint8_t *buf, size_t cap, bool is_default);
+
+/** Применить конфигурацию (Refloat сам запишет её в EEPROM). */
+bool mock_custom_config_set(const uint8_t *buf);
+
+/** Сжатый XML описания параметров. Возвращает длину. */
+int mock_custom_config_get_xml(const uint8_t **data);
+
+// ----------------------------------------------- постоянное хранилище на диске
+
+/** Загрузить эмулируемый EEPROM из файла (если файл есть). */
+bool mock_eeprom_load_file(const char *path);
+
+/** Сохранить эмулируемый EEPROM в файл. */
+bool mock_eeprom_save_file(const char *path);
+
+/**
+ * Автосохранение в файл после каждой успешной записи слова.
+ * Благодаря этому конфигурация переживает перезапуск процесса.
+ */
+void mock_eeprom_set_autosave(const char *path);
+
 // ---------------------------------------------------------- конфигурация VESC
 
 void mock_cfg_set_float(int param, float value);

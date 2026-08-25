@@ -11,6 +11,7 @@
 
 #include <math.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -71,6 +72,15 @@ static struct {
 
     // прочее
     void (*app_data_handler)(unsigned char *data, unsigned int len);
+    void (*app_data_sink)(void *ctx, const uint8_t *data, unsigned int len);
+    void *app_data_sink_ctx;
+
+    // конфигурация, зарегистрированная Refloat через conf_custom_add_config
+    int (*cfg_get)(uint8_t *data, bool is_default);
+    bool (*cfg_set)(uint8_t *data);
+    int (*cfg_get_xml)(uint8_t **data);
+
+    char eeprom_autosave[512];
     void (*log_sink)(const char *fmt, va_list ap);
     bool io_pin_state[16];
 } M;
@@ -489,12 +499,15 @@ static bool if_set_cfg_int(CFG_PARAM p, int v) {
 static void if_conf_custom_add_config(
     int (*g)(uint8_t *, bool), bool (*s)(uint8_t *), int (*x)(uint8_t **)
 ) {
-    (void) g;
-    (void) s;
-    (void) x;
+    M.cfg_get = g;
+    M.cfg_set = s;
+    M.cfg_get_xml = x;
 }
 
 static void if_conf_custom_clear_configs(void) {
+    M.cfg_get = NULL;
+    M.cfg_set = NULL;
+    M.cfg_get_xml = NULL;
 }
 
 // ------------------------------------------------------------------- хранилище
@@ -512,6 +525,9 @@ static bool if_store_eeprom_var(eeprom_var *v, int address) {
         return false;
     }
     M.eeprom[address] = v->as_u32;
+    if (M.eeprom_autosave[0]) {
+        mock_eeprom_save_file(M.eeprom_autosave);
+    }
     return true;
 }
 
@@ -522,8 +538,9 @@ static bool if_store_backup_data(void) {
 // ------------------------------------------------------------------------ comm
 
 static void if_send_app_data(unsigned char *data, unsigned int len) {
-    (void) data;
-    (void) len;
+    if (M.app_data_sink) {
+        M.app_data_sink(M.app_data_sink_ctx, data, len);
+    }
 }
 
 static bool if_set_app_data_handler(void (*f)(unsigned char *, unsigned int)) {
@@ -846,6 +863,93 @@ void mock_eeprom_erase(void) {
 
 void mock_eeprom_set_failing(bool failing) {
     M.eeprom_failing = failing;
+}
+
+bool mock_has_app_data_handler(void) {
+    return M.app_data_handler != NULL;
+}
+
+void mock_app_data_to_firmware(const uint8_t *data, unsigned int len) {
+    if (!M.app_data_handler) {
+        return;
+    }
+    // Обработчик Refloat принимает неконстантный указатель; копируем, чтобы
+    // случайная запись не задела буфер вызывающего.
+    static uint8_t buf[600];
+    if (len > sizeof(buf)) {
+        return;
+    }
+    memcpy(buf, data, len);
+    M.app_data_handler(buf, len);
+}
+
+void mock_set_app_data_sink(
+    void (*sink)(void *ctx, const uint8_t *data, unsigned int len), void *ctx
+) {
+    M.app_data_sink = sink;
+    M.app_data_sink_ctx = ctx;
+}
+
+bool mock_has_custom_config(void) {
+    return M.cfg_get != NULL && M.cfg_get_xml != NULL;
+}
+
+int mock_custom_config_get(uint8_t *buf, size_t cap, bool is_default) {
+    if (!M.cfg_get) {
+        return -1;
+    }
+    // Refloat пишет ровно столько, сколько занимает сериализованная
+    // конфигурация (282 байта для v1.3.0). Ориентир — SERIALIZED_CONFIG_LENGTH
+    // из main.c, то есть 320 байт.
+    if (cap < 320) {
+        return -1;
+    }
+    return M.cfg_get(buf, is_default);
+}
+
+bool mock_custom_config_set(const uint8_t *buf) {
+    if (!M.cfg_set) {
+        return false;
+    }
+    return M.cfg_set((uint8_t *) buf);
+}
+
+int mock_custom_config_get_xml(const uint8_t **data) {
+    if (!M.cfg_get_xml) {
+        return -1;
+    }
+    uint8_t *p = NULL;
+    int len = M.cfg_get_xml(&p);
+    *data = p;
+    return len;
+}
+
+bool mock_eeprom_load_file(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        return false;
+    }
+    size_t n = fread(M.eeprom, sizeof(uint32_t), EEPROM_WORDS, f);
+    fclose(f);
+    return n > 0;
+}
+
+bool mock_eeprom_save_file(const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        return false;
+    }
+    fwrite(M.eeprom, sizeof(uint32_t), EEPROM_WORDS, f);
+    fclose(f);
+    return true;
+}
+
+void mock_eeprom_set_autosave(const char *path) {
+    if (!path) {
+        M.eeprom_autosave[0] = 0;
+        return;
+    }
+    snprintf(M.eeprom_autosave, sizeof(M.eeprom_autosave), "%s", path);
 }
 
 void mock_cfg_set_float(int p, float v) {
