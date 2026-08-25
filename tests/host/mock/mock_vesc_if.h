@@ -159,6 +159,16 @@ void mock_eeprom_set_autosave(const char *path);
 void mock_cfg_set_float(int param, float value);
 void mock_cfg_set_int(int param, int value);
 
+/**
+ * Брать значения CFG_PARAM_* не из внутренних массивов mock-а, а из
+ * FloatCore Config (compat/config/floatcore_limits.h).
+ *
+ * Тогда Refloat и Virtual mcConfig читают одни и те же пределы — ровно то,
+ * ради чего затевался Virtual mcConfig. На ESP32 так же будет устроена
+ * настоящая реализация get_cfg_float()/get_cfg_int().
+ */
+void mock_cfg_use_floatcore_limits(bool enable);
+
 // -------------------------------------------------------------- статистика
 
 /** Число вызовов VESC_IF->mc_set_current с NaN (не должно быть никогда). */

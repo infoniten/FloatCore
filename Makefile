@@ -41,10 +41,13 @@ REFLOAT_SRC := $(filter-out $(RSRC)/led_driver.c, $(wildcard $(RSRC)/*.c)) \
 GEN_SRC     := $(GEN)/conf/confparser.c $(GEN)/conf/confxml.c
 
 # --- Протокольный слой (без платформенных зависимостей) ----------------------
-PROTO_SRC := $(wildcard $(ROOT)/compat/vesc_protocol/*.c)
+PROTO_SRC := $(wildcard $(ROOT)/compat/vesc_protocol/*.c) \
+             $(wildcard $(ROOT)/compat/vesc_protocol/generated/*.c) \
+             $(ROOT)/compat/config/floatcore_limits.c
 
 # --- Mock-платформа ----------------------------------------------------------
-MOCK_SRC := $(ROOT)/tests/host/mock/mock_vesc_if.c \
+MOCK_SRC := $(ROOT)/compat/config/floatcore_limits.c \
+            $(ROOT)/tests/host/mock/mock_vesc_if.c \
             $(ROOT)/tests/host/mock/logical_motor_mock.c \
             $(ROOT)/tests/host/mock/led_driver_host.c \
             $(ROOT)/tests/host/harness/refloat_facade.c
@@ -89,6 +92,14 @@ $(OBJ)/proto_%.o: $(ROOT)/compat/vesc_protocol/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(BASE_CFLAGS) -MMD -MP -c $< -o $@
 
+$(OBJ)/proto_%.o: $(ROOT)/compat/vesc_protocol/generated/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(BASE_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/proto_%.o: $(ROOT)/compat/config/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(BASE_CFLAGS) -MMD -MP -c $< -o $@
+
 $(OBJ)/proto_test_protocol.o: $(ROOT)/tests/protocol/test_protocol.c
 	@mkdir -p $(OBJ)
 	$(CC) $(BASE_CFLAGS) -MMD -MP -c $< -o $@
@@ -107,6 +118,10 @@ HT_OBJ := $(patsubst %,$(OBJ)/ht_%.o,$(notdir $(basename $(HT_SRC))))
 
 HT_VPATH := $(RSRC) $(RSRC)/filters $(RSRC)/lib $(RSRC)/conf $(GEN)/conf $(ROOT)/tests/host $(ROOT)/tests/host/mock $(ROOT)/tests/host/harness
 
+$(OBJ)/ht_%.o: $(ROOT)/compat/config/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(BASE_CFLAGS) -MMD -MP -c $< -o $@
+
 $(OBJ)/ht_%.o: %.c | $(GEN)/conf/confparser.c
 	@mkdir -p $(OBJ)
 	$(CC) $(BASE_CFLAGS) -include stddef.h $(REFLOAT_INC) -MMD -MP -c $< -o $@
@@ -124,7 +139,7 @@ host-tests: $(HOST_TESTS_BIN)
 # В src/ у Refloat лежит собственный time.h, который иначе перекрыл бы
 # системный <time.h> (та самая изоляция, описанная в docs/threading_model.md).
 
-FH_SRC := $(REFLOAT_SRC) $(GEN_SRC) $(MOCK_SRC) $(PROTO_SRC) \
+FH_SRC := $(REFLOAT_SRC) $(GEN_SRC) $(filter-out $(ROOT)/compat/config/floatcore_limits.c,$(MOCK_SRC)) $(PROTO_SRC) \
           $(GEN)/qml_app.c \
           $(ROOT)/platform/host/tcp_transport.c $(ROOT)/platform/host/floatcore_host.c
 FH_OBJ := $(patsubst %,$(OBJ)/fh_%.o,$(notdir $(basename $(FH_SRC))))
@@ -136,6 +151,14 @@ $(OBJ)/fh_%.o: $(ROOT)/platform/host/%.c | $(GEN)/qml_app.h
 	$(CC) $(PLAIN_CFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJ)/fh_%.o: $(ROOT)/compat/vesc_protocol/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(PLAIN_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/fh_%.o: $(ROOT)/compat/vesc_protocol/generated/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(PLAIN_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/fh_%.o: $(ROOT)/compat/config/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(PLAIN_CFLAGS) -MMD -MP -c $< -o $@
 

@@ -8,6 +8,7 @@
 //
 // Заголовки Refloat здесь не подключаются (см. tests/host/harness/refloat_facade.h).
 
+#include "../../compat/config/floatcore_limits.h"
 #include "../../compat/motor/logical_motor.h"
 #include "../../compat/vesc_protocol/commands.h"
 #include "../../tests/host/mock/logical_motor_mock.h"
@@ -42,6 +43,8 @@ typedef struct {
 
     volatile bool running;
     bool trace;
+    bool mcconf_enabled;
+    const char *mcconf_schema_version;
 } Host;
 
 static Host H;
@@ -147,6 +150,24 @@ static void telemetry_provider(void *ctx, VescValues *out) {
     telemetry_from_logical_motor(&lm, 0.0f, 0.0f, 0, out);
 }
 
+/**
+ * Virtual mcConfig: проекция FloatCore Config, вычисляемая на каждый запрос.
+ * Собственного хранилища у неё нет — все значения берутся из
+ * compat/config/floatcore_limits.h, откуда их читает и сам Refloat.
+ */
+static void mcconf_provider(void *ctx, VirtualMcConfValues *out) {
+    (void) ctx;
+    out->si_battery_cells = fc_battery_cell_count();
+    out->l_current_max = fc_effective_current_max();
+    out->l_current_min = fc_effective_current_min();
+    out->l_in_current_max = fc_effective_in_current_max();
+    out->l_in_current_min = fc_effective_in_current_min();
+    out->l_temp_fet_start = fc_effective_temp_fet_start();
+    out->l_temp_fet_end = fc_effective_temp_fet_end();
+    out->l_temp_motor_start = fc_effective_temp_motor_start();
+    out->l_temp_motor_end = fc_effective_temp_motor_end();
+}
+
 static int qml_app_provider(void *ctx, const uint8_t **data) {
     (void) ctx;
     *data = qml_app_data;
@@ -247,6 +268,57 @@ static void on_sigint(int sig) {
     }
 }
 
+// ------------------------------------------------------------ разбор --limits
+
+/**
+ * Пределы задаются одной строкой: cells=10,imax=25,imin=-5,...
+ * Значения кладутся в собственные пределы FloatCore; физические ESC на host
+ * отсутствуют, поэтому агрегация вырождается в них же.
+ */
+static bool apply_limits_spec(const char *spec) {
+    FcSourceLimits fc = floatcore_limits()->floatcore;
+    FcBatteryConfig batt = floatcore_limits()->battery;
+
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", spec);
+
+    for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+        char *eq = strchr(tok, '=');
+        if (!eq) {
+            return false;
+        }
+        *eq = 0;
+        const char *key = tok;
+        const double v = atof(eq + 1);
+
+        if (strcmp(key, "cells") == 0) {
+            batt.cell_count = (uint8_t) v;
+        } else if (strcmp(key, "imax") == 0) {
+            fc.current_max = (float) v;
+        } else if (strcmp(key, "imin") == 0) {
+            fc.current_min = (float) v;
+        } else if (strcmp(key, "inmax") == 0) {
+            fc.in_current_max = (float) v;
+        } else if (strcmp(key, "inmin") == 0) {
+            fc.in_current_min = (float) v;
+        } else if (strcmp(key, "fet_start") == 0) {
+            fc.temp_fet_start = (float) v;
+        } else if (strcmp(key, "fet_end") == 0) {
+            fc.temp_fet_end = (float) v;
+        } else if (strcmp(key, "motor_start") == 0) {
+            fc.temp_motor_start = (float) v;
+        } else if (strcmp(key, "motor_end") == 0) {
+            fc.temp_motor_end = (float) v;
+        } else {
+            return false;
+        }
+    }
+
+    floatcore_limits_set_floatcore(&fc);
+    floatcore_limits_set_battery(&batt);
+    return true;
+}
+
 // --------------------------------------------------------------------- main
 
 static void usage(const char *argv0) {
@@ -257,6 +329,12 @@ static void usage(const char *argv0) {
         "  --eeprom <файл>  файл постоянного хранения конфигурации\n"
         "                   (по умолчанию build/floatcore_eeprom.bin)\n"
         "  --trace          включить трассировку протокола\n"
+        "  --limits <spec>  пределы FloatCore, например:\n"
+        "                   cells=10,imax=25,imin=-5,inmax=15,inmin=0,\n"
+        "                   fet_start=80,fet_end=100,motor_start=80,motor_end=100\n"
+        "  --mcconf-schema <ver>  схема Motor Configuration (6.06 | 7.01)\n"
+        "                   должна совпадать с версией вашего VESC Tool\n"
+        "  --no-mcconf      не отдавать Virtual mcConfig\n"
         "  --verbose        показывать лог Refloat\n"
         "  --help\n\n"
         "В VESC Tool: Connection → TCP → 127.0.0.1 : <порт> → Connect\n",
@@ -269,7 +347,10 @@ int main(int argc, char **argv) {
 
     uint16_t port = 65102;
     const char *eeprom_path = "build/floatcore_eeprom.bin";
+    const char *limits_spec = NULL;
     bool verbose = false;
+
+    H.mcconf_enabled = true;
 
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
@@ -278,6 +359,12 @@ int main(int argc, char **argv) {
             eeprom_path = argv[++i];
         } else if (strcmp(argv[i], "--trace") == 0) {
             H.trace = true;
+        } else if (strcmp(argv[i], "--limits") == 0 && i + 1 < argc) {
+            limits_spec = argv[++i];
+        } else if (strcmp(argv[i], "--mcconf-schema") == 0 && i + 1 < argc) {
+            H.mcconf_schema_version = argv[++i];
+        } else if (strcmp(argv[i], "--no-mcconf") == 0) {
+            H.mcconf_enabled = false;
         } else if (strcmp(argv[i], "--verbose") == 0) {
             verbose = true;
         } else if (strcmp(argv[i], "--help") == 0) {
@@ -293,8 +380,18 @@ int main(int argc, char **argv) {
     pthread_mutex_init(&H.refloat_lock, NULL);
     pthread_mutex_init(&H.tx_lock, NULL);
 
+    // --- FloatCore Config: единственный источник истины по ограничениям
+    floatcore_limits_init();
+    if (limits_spec && !apply_limits_spec(limits_spec)) {
+        fprintf(stderr, "[host] не разобран --limits: %s\n", limits_spec);
+        return 1;
+    }
+
     // --- платформа и Refloat
     mock_init();
+    // Refloat читает пределы через VESC_IF->get_cfg_float() — направляем его
+    // в тот же FloatCore Config, из которого строится Virtual mcConfig.
+    mock_cfg_use_floatcore_limits(true);
     if (verbose) {
         mock_set_log_sink(refloat_log_sink);
     }
@@ -324,6 +421,24 @@ int main(int argc, char **argv) {
     H.server.telemetry_provider = telemetry_provider;
     H.server.qml_app_provider = qml_app_provider;
     H.server.custom_app.to_firmware = custom_app_to_firmware;
+
+    if (H.mcconf_enabled) {
+        const McConfSchema *schema = H.mcconf_schema_version
+            ? virtual_mcconf_schema_by_version(H.mcconf_schema_version)
+            : virtual_mcconf_default_schema();
+        if (!schema) {
+            fprintf(stderr, "[host] неизвестная схема mcconf: %s. Доступны:",
+                    H.mcconf_schema_version);
+            for (size_t i = 0; i < virtual_mcconf_schema_count(); ++i) {
+                fprintf(stderr, " %s", virtual_mcconf_schema_at(i)->version);
+            }
+            fprintf(stderr, "\n");
+            return 1;
+        }
+        H.server.mcconf_schema = schema;
+        H.server.mcconf_provider = mcconf_provider;
+        H.server.mcconf_push_on_connect = true;
+    }
     H.server.config.get_xml = cfg_get_xml;
     H.server.config.get = cfg_get;
     H.server.config.set = cfg_set;
@@ -344,6 +459,18 @@ int main(int argc, char **argv) {
     }
     log_line("[host] TCP-сервер на порту %u. В VESC Tool: Connection → TCP → 127.0.0.1:%u", port,
              port);
+    if (H.mcconf_enabled) {
+        log_line(
+            "[host] Virtual mcConfig: схема %s, ток %.1f/%.1f А, вход %.1f/%.1f А, "
+            "FET %.0f/%.0f °C, ячеек %u",
+            H.server.mcconf_schema->version, fc_effective_current_max(),
+            fc_effective_current_min(), fc_effective_in_current_max(),
+            fc_effective_in_current_min(), fc_effective_temp_fet_start(),
+            fc_effective_temp_fet_end(), (unsigned) fc_battery_cell_count()
+        );
+    } else {
+        log_line("[host] Virtual mcConfig отключён: Refloat UI возьмёт значения VESC Tool");
+    }
     log_line("[host] вывод на моторы физически невозможен: backend — mock, CAN отсутствует");
 
     H.running = true;

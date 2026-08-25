@@ -26,7 +26,10 @@ cleanup() {
 trap cleanup EXIT
 
 start_host() {
-    "$BIN" --port "$PORT" --eeprom "$EEPROM" >>"$LOG" 2>&1 &
+    # Фикстура из ТЗ v0.4.1 §8
+    "$BIN" --port "$PORT" --eeprom "$EEPROM" \
+        --limits cells=10,imax=25,imin=-5,inmax=15,inmin=0,fet_start=80,fet_end=100 \
+        >>"$LOG" 2>&1 &
     HOST_PID=$!
     python3 - "$PORT" <<'PY'
 import socket, sys, time

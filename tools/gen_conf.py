@@ -7,9 +7,15 @@
 VESC Tool (refloat-upstream/vesc_pkg_lib/examples/config/conf/), и воспроизводит их
 байт-в-байт по структуре.
 
-ВНИМАНИЕ: signature считается нашим алгоритмом и НЕ совпадает с сигнатурой VESC Tool.
-Для прошивки, которая должна общаться с VESC Tool, источником истины остаётся
-зафиксированная версия vesc_tool (см. docs/threading_model.md, раздел Build).
+Сигнатура конфигурации считается тем же алгоритмом, что и VESC Tool
+(ConfigParams::getSignature: CRC32C по конкатенации name+type+vTx+enumNames для
+каждого параметра в SerOrder). Алгоритм сверен с эталоном: для
+vesc_pkg_lib/examples/config/conf/settings.xml он даёт 32903057 — ровно то
+значение, которое VESC Tool записал в сгенерированный им confparser.h.
+
+Это важно: VESC Tool проверяет сигнатуру при разборе конфигурации
+(ConfigParams::deSerialize) и при несовпадении показывает диалог
+"Could not deserialize custom config".
 
 Выводит:
   <out>/conf/conf_default.h
@@ -61,7 +67,10 @@ def parse(path):
     root = ET.parse(path).getroot()
     params = {}
     for p in root.find('Params'):
-        params[p.tag] = {c.tag: (c.text or '') for c in p}
+        d = {c.tag: (c.text or '') for c in p}
+        # enumNames встречается многократно и участвует в сигнатуре
+        d['enumNames'] = [(e.text or '') for e in p.findall('enumNames')]
+        params[p.tag] = d
     order = [e.text for e in root.find('SerOrder')]
     return params, order
 
@@ -100,13 +109,34 @@ def default_value(d):
     return '0'
 
 
+def crc32c(data: bytes) -> int:
+    """CRC-32C (Castagnoli), как Utility::crc32c в VESC Tool."""
+    crc = 0xFFFFFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            mask = -(crc & 1) & 0xFFFFFFFF
+            crc = (crc >> 1) ^ (0x82F63B78 & mask)
+    return (~crc) & 0xFFFFFFFF
+
+
 def signature(params, order):
-    """Детерминированный хеш описания конфигурации (аналог сигнатуры VESC Tool)."""
-    blob = ''.join(
-        f"{n}:{params[n]['type']}:{params[n].get('vTx','')}:{params[n].get('vTxDoubleScale','')};"
-        for n in order
-    )
-    return zlib.crc32(blob.encode()) & 0x7FFFFFFF
+    """
+    Точная копия ConfigParams::getSignature() из VESC Tool.
+
+    Сверено с эталоном: для примера из vesc_pkg_lib даёт 32903057 —
+    значение, которое сам VESC Tool положил в confparser.h.
+    """
+    s = ''
+    for name in order:
+        s += name
+        d = params.get(name)
+        if d is None:
+            continue
+        s += str(int(d.get('type') or 0))
+        s += str(int(d.get('vTx') or 0))
+        s += ''.join(d.get('enumNames', []))
+    return crc32c(s.encode('utf-8'))
 
 
 def gen(settings, out_dir, version, package_name, git_hash):

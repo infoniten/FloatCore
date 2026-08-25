@@ -72,6 +72,7 @@ const char *vesc_command_name(uint8_t id);
 #include "firmware_info.h"
 #include "packet.h"
 #include "telemetry.h"
+#include "virtual_mcconf.h"
 
 typedef struct {
     uint32_t rx_frames;
@@ -81,6 +82,8 @@ typedef struct {
     uint32_t motor_commands_blocked; // попытки управления мотором — заблокированы
     uint32_t empty_payloads;
     uint32_t truncated_payloads;     // payload короче, чем требуют аргументы команды
+    uint32_t mcconf_sent;            // отдано Virtual mcConfig
+    uint32_t mcconf_writes_rejected; // попытки записать конфигурацию мотора
 } VescServerStats;
 
 typedef struct {
@@ -95,6 +98,26 @@ typedef struct {
 
     /** Провайдер QML приложения. Возвращает длину сжатых данных. */
     int (*qml_app_provider)(void *ctx, const uint8_t **data);
+
+    /**
+     * Virtual mcConfig. NULL — Refloat UI будет пользоваться значениями
+     * по умолчанию из самого VESC Tool (поведение до версии 0.4.1).
+     */
+    void (*mcconf_provider)(void *ctx, VirtualMcConfValues *out);
+
+    /** Схема Motor Configuration. NULL — используется самая новая известная. */
+    const McConfSchema *mcconf_schema;
+
+    /**
+     * Отправлять Virtual mcConfig сразу после ответа на COMM_FW_VERSION.
+     *
+     * При hw_type = CUSTOM_MODULE сам VESC Tool никогда не запрашивает
+     * конфигурацию мотора (mobile/main.qml проверяет hwTypeStr() === "VESC"),
+     * поэтому единственный способ наполнить `VescIf.mcConfig()` — отдать её
+     * инициативно. Приёмник в VESC Tool это допускает: Commands::processPacket
+     * обрабатывает COMM_GET_MCCONF независимо от того, запрашивал он его или нет.
+     */
+    bool mcconf_push_on_connect;
 
     void *ctx;
 
@@ -120,3 +143,6 @@ void vesc_server_feed(VescServer *s, const uint8_t *data, size_t len);
 bool vesc_server_send_custom_app_data(VescServer *s, const uint8_t *data, size_t len);
 
 void vesc_server_set_trace(VescServer *s, bool on);
+
+/** Отправить Virtual mcConfig (текущую проекцию либо значения по умолчанию). */
+bool vesc_server_send_mcconf(VescServer *s, bool is_default);

@@ -1,0 +1,1623 @@
+{
+ "version": "7.01",
+ "signature": 3154770096,
+ "blob_size": 488,
+ "params": [
+  {
+   "name": "pwm_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 4
+  },
+  {
+   "name": "comm_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 5
+  },
+  {
+   "name": "motor_type",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 2.0,
+   "offset": 6
+  },
+  {
+   "name": "sensor_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 7
+  },
+  {
+   "name": "l_current_max",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 60.0,
+   "offset": 8
+  },
+  {
+   "name": "l_current_min",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": -60.0,
+   "offset": 12
+  },
+  {
+   "name": "l_in_current_max",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 99.0,
+   "offset": 16
+  },
+  {
+   "name": "l_in_current_min",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": -60.0,
+   "offset": 20
+  },
+  {
+   "name": "l_in_current_map_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 1.0,
+   "offset": 24
+  },
+  {
+   "name": "l_in_current_map_filter",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.005,
+   "offset": 26
+  },
+  {
+   "name": "l_abs_current_max",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 150.0,
+   "offset": 28
+  },
+  {
+   "name": "l_min_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": -100000.0,
+   "offset": 32
+  },
+  {
+   "name": "l_max_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 100000.0,
+   "offset": 36
+  },
+  {
+   "name": "l_erpm_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.8,
+   "offset": 40
+  },
+  {
+   "name": "l_max_erpm_fbrake",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 300.0,
+   "offset": 42
+  },
+  {
+   "name": "l_max_erpm_fbrake_cc",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 1500.0,
+   "offset": 46
+  },
+  {
+   "name": "l_min_vin",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 8.0,
+   "offset": 50
+  },
+  {
+   "name": "l_max_vin",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 57.0,
+   "offset": 52
+  },
+  {
+   "name": "l_battery_cut_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 10.0,
+   "offset": 54
+  },
+  {
+   "name": "l_battery_cut_end",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 8.0,
+   "offset": 56
+  },
+  {
+   "name": "l_battery_regen_cut_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 1000.0,
+   "offset": 58
+  },
+  {
+   "name": "l_battery_regen_cut_end",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 1100.0,
+   "offset": 60
+  },
+  {
+   "name": "l_slow_abs_current",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 62
+  },
+  {
+   "name": "l_temp_fet_start",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 85.0,
+   "offset": 63
+  },
+  {
+   "name": "l_temp_fet_end",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 100.0,
+   "offset": 64
+  },
+  {
+   "name": "l_temp_motor_start",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 85.0,
+   "offset": 65
+  },
+  {
+   "name": "l_temp_motor_end",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 100.0,
+   "offset": 66
+  },
+  {
+   "name": "l_temp_accel_dec",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.15,
+   "offset": 67
+  },
+  {
+   "name": "l_min_duty",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.005,
+   "offset": 69
+  },
+  {
+   "name": "l_max_duty",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.95,
+   "offset": 71
+  },
+  {
+   "name": "l_watt_max",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 1500000.0,
+   "offset": 73
+  },
+  {
+   "name": "l_watt_min",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": -1500000.0,
+   "offset": 77
+  },
+  {
+   "name": "l_current_max_scale",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 1.0,
+   "offset": 81
+  },
+  {
+   "name": "l_current_min_scale",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 1.0,
+   "offset": 83
+  },
+  {
+   "name": "l_duty_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 1.0,
+   "offset": 85
+  },
+  {
+   "name": "l_additional_faults",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 87
+  },
+  {
+   "name": "sl_min_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 150.0,
+   "offset": 88
+  },
+  {
+   "name": "sl_min_erpm_cycle_int_limit",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 1100.0,
+   "offset": 92
+  },
+  {
+   "name": "sl_max_fullbreak_current_dir_change",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 10.0,
+   "offset": 96
+  },
+  {
+   "name": "sl_cycle_int_limit",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 62.0,
+   "offset": 100
+  },
+  {
+   "name": "sl_phase_advance_at_br",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.8,
+   "offset": 102
+  },
+  {
+   "name": "sl_cycle_int_rpm_br",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 80000.0,
+   "offset": 104
+  },
+  {
+   "name": "sl_bemf_coupling_k",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 600.0,
+   "offset": 108
+  },
+  {
+   "name": "hall_table__0",
+   "kind": "MC_KIND_I8",
+   "size": 1,
+   "scale": 1.0,
+   "default": -1.0,
+   "offset": 112
+  },
+  {
+   "name": "hall_table__1",
+   "kind": "MC_KIND_I8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 113
+  },
+  {
+   "name": "hall_table__2",
+   "kind": "MC_KIND_I8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 3.0,
+   "offset": 114
+  },
+  {
+   "name": "hall_table__3",
+   "kind": "MC_KIND_I8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 2.0,
+   "offset": 115
+  },
+  {
+   "name": "hall_table__4",
+   "kind": "MC_KIND_I8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 5.0,
+   "offset": 116
+  },
+  {
+   "name": "hall_table__5",
+   "kind": "MC_KIND_I8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 6.0,
+   "offset": 117
+  },
+  {
+   "name": "hall_table__6",
+   "kind": "MC_KIND_I8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 4.0,
+   "offset": 118
+  },
+  {
+   "name": "hall_table__7",
+   "kind": "MC_KIND_I8",
+   "size": 1,
+   "scale": 1.0,
+   "default": -1.0,
+   "offset": 119
+  },
+  {
+   "name": "hall_sl_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 2000.0,
+   "offset": 120
+  },
+  {
+   "name": "foc_current_kp",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 100000.0,
+   "default": 0.0123,
+   "offset": 124
+  },
+  {
+   "name": "foc_current_ki",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 100000.0,
+   "default": 11.85,
+   "offset": 128
+  },
+  {
+   "name": "foc_f_zv",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 30000.0,
+   "offset": 132
+  },
+  {
+   "name": "foc_dt_us",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.12,
+   "offset": 136
+  },
+  {
+   "name": "foc_encoder_inverted",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 140
+  },
+  {
+   "name": "foc_encoder_offset",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 180.0,
+   "offset": 141
+  },
+  {
+   "name": "foc_encoder_ratio",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 7.0,
+   "offset": 145
+  },
+  {
+   "name": "foc_sensor_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 149
+  },
+  {
+   "name": "foc_pll_kp",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 2000.0,
+   "offset": 150
+  },
+  {
+   "name": "foc_pll_ki",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 30000.0,
+   "offset": 154
+  },
+  {
+   "name": "foc_motor_l",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 100000000.0,
+   "default": 1.227e-05,
+   "offset": 158
+  },
+  {
+   "name": "foc_motor_ld_lq_diff",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 100000000.0,
+   "default": 3.77e-06,
+   "offset": 162
+  },
+  {
+   "name": "foc_motor_r",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 100000.0,
+   "default": 0.0118,
+   "offset": 166
+  },
+  {
+   "name": "foc_motor_flux_linkage",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 100000.0,
+   "default": 0.004014,
+   "offset": 170
+  },
+  {
+   "name": "foc_observer_gain",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 0.01,
+   "default": 62060000.0,
+   "offset": 174
+  },
+  {
+   "name": "foc_observer_gain_slow",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 0.01,
+   "default": 0.05,
+   "offset": 178
+  },
+  {
+   "name": "foc_observer_offset",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": -1.0,
+   "offset": 182
+  },
+  {
+   "name": "foc_duty_dowmramp_kp",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 50.0,
+   "offset": 184
+  },
+  {
+   "name": "foc_duty_dowmramp_ki",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 1000.0,
+   "offset": 188
+  },
+  {
+   "name": "foc_start_curr_dec",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 1.0,
+   "offset": 192
+  },
+  {
+   "name": "foc_start_curr_dec_rpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 2500.0,
+   "offset": 194
+  },
+  {
+   "name": "foc_openloop_rpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 1500.0,
+   "offset": 198
+  },
+  {
+   "name": "foc_openloop_rpm_low",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.0,
+   "offset": 202
+  },
+  {
+   "name": "foc_sl_openloop_hyst",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 100.0,
+   "default": 0.1,
+   "offset": 204
+  },
+  {
+   "name": "foc_sl_openloop_time_lock",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 100.0,
+   "default": 0.0,
+   "offset": 206
+  },
+  {
+   "name": "foc_sl_openloop_time_ramp",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 100.0,
+   "default": 0.1,
+   "offset": 208
+  },
+  {
+   "name": "foc_sl_openloop_time",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 100.0,
+   "default": 0.05,
+   "offset": 210
+  },
+  {
+   "name": "foc_sl_openloop_boost_q",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 100.0,
+   "default": 0.0,
+   "offset": 212
+  },
+  {
+   "name": "foc_sl_openloop_max_q",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 100.0,
+   "default": -1.0,
+   "offset": 214
+  },
+  {
+   "name": "foc_hall_table__0",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 255.0,
+   "offset": 216
+  },
+  {
+   "name": "foc_hall_table__1",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 255.0,
+   "offset": 217
+  },
+  {
+   "name": "foc_hall_table__2",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 255.0,
+   "offset": 218
+  },
+  {
+   "name": "foc_hall_table__3",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 255.0,
+   "offset": 219
+  },
+  {
+   "name": "foc_hall_table__4",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 255.0,
+   "offset": 220
+  },
+  {
+   "name": "foc_hall_table__5",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 255.0,
+   "offset": 221
+  },
+  {
+   "name": "foc_hall_table__6",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 255.0,
+   "offset": 222
+  },
+  {
+   "name": "foc_hall_table__7",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 255.0,
+   "offset": 223
+  },
+  {
+   "name": "foc_hall_interp_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 500.0,
+   "offset": 224
+  },
+  {
+   "name": "foc_sl_erpm_start",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 2500.0,
+   "offset": 228
+  },
+  {
+   "name": "foc_sl_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 3500.0,
+   "offset": 232
+  },
+  {
+   "name": "foc_control_sample_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 236
+  },
+  {
+   "name": "foc_current_sample_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 237
+  },
+  {
+   "name": "foc_sat_comp_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 2.0,
+   "offset": 238
+  },
+  {
+   "name": "foc_sat_comp",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.0,
+   "offset": 239
+  },
+  {
+   "name": "foc_temp_comp",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 241
+  },
+  {
+   "name": "foc_temp_comp_base_temp",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 100.0,
+   "default": 25.0,
+   "offset": 242
+  },
+  {
+   "name": "foc_current_filter_const",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.1,
+   "offset": 244
+  },
+  {
+   "name": "foc_cc_decoupling",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 246
+  },
+  {
+   "name": "foc_observer_type",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 3.0,
+   "offset": 247
+  },
+  {
+   "name": "foc_hfi_amb_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 248
+  },
+  {
+   "name": "foc_hfi_amb_current",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 60.0,
+   "offset": 249
+  },
+  {
+   "name": "foc_hfi_amb_tres",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 15.0,
+   "offset": 251
+  },
+  {
+   "name": "foc_hfi_voltage_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 20.0,
+   "offset": 252
+  },
+  {
+   "name": "foc_hfi_voltage_run",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 4.0,
+   "offset": 254
+  },
+  {
+   "name": "foc_hfi_voltage_max",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 6.0,
+   "offset": 256
+  },
+  {
+   "name": "foc_hfi_gain",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.3,
+   "offset": 258
+  },
+  {
+   "name": "foc_hfi_max_err",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.15,
+   "offset": 260
+  },
+  {
+   "name": "foc_hfi_hyst",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 100.0,
+   "default": 0.0,
+   "offset": 262
+  },
+  {
+   "name": "foc_sl_erpm_hfi",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 3000.0,
+   "offset": 264
+  },
+  {
+   "name": "foc_hfi_reset_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 500.0,
+   "offset": 268
+  },
+  {
+   "name": "foc_hfi_start_samples",
+   "kind": "MC_KIND_U16",
+   "size": 2,
+   "scale": 1.0,
+   "default": 5.0,
+   "offset": 272
+  },
+  {
+   "name": "foc_hfi_obs_ovr_sec",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 0.001,
+   "offset": 274
+  },
+  {
+   "name": "foc_hfi_samples",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 278
+  },
+  {
+   "name": "foc_offsets_cal_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 279
+  },
+  {
+   "name": "foc_offsets_current__0",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 2047.39,
+   "offset": 280
+  },
+  {
+   "name": "foc_offsets_current__1",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 2048.29,
+   "offset": 284
+  },
+  {
+   "name": "foc_offsets_current__2",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 2048.89,
+   "offset": 288
+  },
+  {
+   "name": "foc_offsets_voltage__0",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.0002,
+   "offset": 292
+  },
+  {
+   "name": "foc_offsets_voltage__1",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.0006,
+   "offset": 294
+  },
+  {
+   "name": "foc_offsets_voltage__2",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": -0.0009,
+   "offset": 296
+  },
+  {
+   "name": "foc_offsets_voltage_undriven__0",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.0005,
+   "offset": 298
+  },
+  {
+   "name": "foc_offsets_voltage_undriven__1",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": -0.0003,
+   "offset": 300
+  },
+  {
+   "name": "foc_offsets_voltage_undriven__2",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": -0.0002,
+   "offset": 302
+  },
+  {
+   "name": "foc_phase_filter_enable",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 304
+  },
+  {
+   "name": "foc_phase_filter_disable_fault",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 305
+  },
+  {
+   "name": "foc_phase_filter_max_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 10000.0,
+   "default": 4000.0,
+   "offset": 306
+  },
+  {
+   "name": "foc_mtpa_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 310
+  },
+  {
+   "name": "foc_fw_current_max",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 0.0,
+   "offset": 311
+  },
+  {
+   "name": "foc_fw_duty_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.9,
+   "offset": 315
+  },
+  {
+   "name": "foc_fw_ramp_time",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.2,
+   "offset": 317
+  },
+  {
+   "name": "foc_fw_q_current_factor",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.02,
+   "offset": 319
+  },
+  {
+   "name": "foc_fw_backoff",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 1.0,
+   "offset": 321
+  },
+  {
+   "name": "foc_speed_soure",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 323
+  },
+  {
+   "name": "foc_short_ls_on_zero_duty",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 324
+  },
+  {
+   "name": "foc_overmod_factor",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 1.0,
+   "offset": 325
+  },
+  {
+   "name": "foc_mag_vd_max",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.98,
+   "offset": 327
+  },
+  {
+   "name": "sp_pid_loop_rate",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 5.0,
+   "offset": 329
+  },
+  {
+   "name": "s_pid_kp",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.004,
+   "offset": 330
+  },
+  {
+   "name": "s_pid_ki",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.004,
+   "offset": 334
+  },
+  {
+   "name": "s_pid_kd",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.0001,
+   "offset": 338
+  },
+  {
+   "name": "s_pid_kd_filter",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.2,
+   "offset": 342
+  },
+  {
+   "name": "s_pid_min_erpm",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 900.0,
+   "offset": 344
+  },
+  {
+   "name": "s_pid_allow_braking",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 348
+  },
+  {
+   "name": "s_pid_ramp_erpms_s",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 25000.0,
+   "offset": 349
+  },
+  {
+   "name": "s_pid_speed_source",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 353
+  },
+  {
+   "name": "p_pid_kp",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.025,
+   "offset": 354
+  },
+  {
+   "name": "p_pid_ki",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.0,
+   "offset": 358
+  },
+  {
+   "name": "p_pid_kd",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.0,
+   "offset": 362
+  },
+  {
+   "name": "p_pid_kd_proc",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.00035,
+   "offset": 366
+  },
+  {
+   "name": "p_pid_kd_filter",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.2,
+   "offset": 370
+  },
+  {
+   "name": "p_pid_ang_div",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 100000.0,
+   "default": 1.0,
+   "offset": 372
+  },
+  {
+   "name": "p_pid_gain_dec_angle",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 0.0,
+   "offset": 376
+  },
+  {
+   "name": "p_pid_offset",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.0,
+   "offset": 378
+  },
+  {
+   "name": "cc_startup_boost_duty",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.01,
+   "offset": 382
+  },
+  {
+   "name": "cc_min_current",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000.0,
+   "default": 0.05,
+   "offset": 384
+  },
+  {
+   "name": "cc_gain",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.0046,
+   "offset": 388
+  },
+  {
+   "name": "cc_ramp_step_max",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.04,
+   "offset": 392
+  },
+  {
+   "name": "m_fault_stop_time_ms",
+   "kind": "MC_KIND_I32",
+   "size": 4,
+   "scale": 1.0,
+   "default": 500.0,
+   "offset": 394
+  },
+  {
+   "name": "m_duty_ramp_step",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10000.0,
+   "default": 0.02,
+   "offset": 398
+  },
+  {
+   "name": "m_current_backoff_gain",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1000000.0,
+   "default": 0.5,
+   "offset": 400
+  },
+  {
+   "name": "m_encoder_counts",
+   "kind": "MC_KIND_U32",
+   "size": 4,
+   "scale": 1.0,
+   "default": 8192.0,
+   "offset": 404
+  },
+  {
+   "name": "m_encoder_sin_amp",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 1.0,
+   "offset": 408
+  },
+  {
+   "name": "m_encoder_cos_amp",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 1.0,
+   "offset": 410
+  },
+  {
+   "name": "m_encoder_sin_offset",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 1.65,
+   "offset": 412
+  },
+  {
+   "name": "m_encoder_cos_offset",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 1.65,
+   "offset": 414
+  },
+  {
+   "name": "m_encoder_sincos_filter_constant",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.5,
+   "offset": 416
+  },
+  {
+   "name": "m_encoder_sincos_phase_correction",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.0,
+   "offset": 418
+  },
+  {
+   "name": "m_sensor_port_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 420
+  },
+  {
+   "name": "m_invert_direction",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 421
+  },
+  {
+   "name": "m_drv8301_oc_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 422
+  },
+  {
+   "name": "m_drv8301_oc_adj",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 19.0,
+   "offset": 423
+  },
+  {
+   "name": "m_bldc_f_sw_min",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 3000.0,
+   "offset": 424
+  },
+  {
+   "name": "m_bldc_f_sw_max",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 35000.0,
+   "offset": 428
+  },
+  {
+   "name": "m_dc_f_sw",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 25000.0,
+   "offset": 432
+  },
+  {
+   "name": "m_ntc_motor_beta",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 3380.0,
+   "offset": 436
+  },
+  {
+   "name": "m_out_aux_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 440
+  },
+  {
+   "name": "m_motor_temp_sens_type",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 441
+  },
+  {
+   "name": "m_ptc_motor_coeff",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 0.61,
+   "offset": 442
+  },
+  {
+   "name": "m_ntcx_ptcx_res",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 0.1,
+   "default": 10000.0,
+   "offset": 446
+  },
+  {
+   "name": "m_ntcx_ptcx_temp_base",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 10.0,
+   "default": 25.0,
+   "offset": 448
+  },
+  {
+   "name": "m_hall_extra_samples",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 3.0,
+   "offset": 450
+  },
+  {
+   "name": "m_batt_filter_const",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 45.0,
+   "offset": 451
+  },
+  {
+   "name": "si_motor_poles",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 14.0,
+   "offset": 452
+  },
+  {
+   "name": "si_gear_ratio",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 3.0,
+   "offset": 453
+  },
+  {
+   "name": "si_wheel_diameter",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 0.083,
+   "offset": 457
+  },
+  {
+   "name": "si_battery_type",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 461
+  },
+  {
+   "name": "si_battery_cells",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 3.0,
+   "offset": 462
+  },
+  {
+   "name": "si_battery_ah",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 6.0,
+   "offset": 463
+  },
+  {
+   "name": "si_motor_nl_current",
+   "kind": "MC_KIND_DOUBLE32_AUTO",
+   "size": 4,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 467
+  },
+  {
+   "name": "bms.type",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 1.0,
+   "offset": 471
+  },
+  {
+   "name": "bms.limit_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 3.0,
+   "offset": 472
+  },
+  {
+   "name": "bms.t_limit_start",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 45.0,
+   "offset": 473
+  },
+  {
+   "name": "bms.t_limit_end",
+   "kind": "MC_KIND_U8",
+   "size": 1,
+   "scale": 1.0,
+   "default": 65.0,
+   "offset": 474
+  },
+  {
+   "name": "bms.soc_limit_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.05,
+   "offset": 475
+  },
+  {
+   "name": "bms.soc_limit_end",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 0.0,
+   "offset": 477
+  },
+  {
+   "name": "bms.vmin_limit_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 2.9,
+   "offset": 479
+  },
+  {
+   "name": "bms.vmin_limit_end",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 2.5,
+   "offset": 481
+  },
+  {
+   "name": "bms.vmax_limit_start",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 4.2,
+   "offset": 483
+  },
+  {
+   "name": "bms.vmax_limit_end",
+   "kind": "MC_KIND_DOUBLE16",
+   "size": 2,
+   "scale": 1000.0,
+   "default": 4.3,
+   "offset": 485
+  },
+  {
+   "name": "bms.fwd_can_mode",
+   "kind": "MC_KIND_BYTE",
+   "size": 1,
+   "scale": 1.0,
+   "default": 0.0,
+   "offset": 487
+  }
+ ]
+}

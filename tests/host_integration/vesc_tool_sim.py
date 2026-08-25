@@ -10,6 +10,8 @@ VESC Tool. Не заменяет проверку живым VESC Tool, но п�
 """
 
 import argparse
+import json
+import os
 import socket
 import struct
 import sys
@@ -25,6 +27,9 @@ COMM_GET_CUSTOM_CONFIG_XML = 92
 COMM_GET_CUSTOM_CONFIG = 93
 COMM_GET_CUSTOM_CONFIG_DEFAULT = 94
 COMM_SET_CUSTOM_CONFIG = 95
+COMM_GET_MCCONF = 14
+COMM_GET_MCCONF_DEFAULT = 15
+COMM_SET_MCCONF = 13
 COMM_GET_QML_UI_APP = 118
 
 # --- протокол пакета Refloat (refloat-upstream/doc/commands/) ----------------
@@ -198,6 +203,70 @@ def fetch_chunked(link, cmd, conf_ind=None):
     return total, data
 
 
+# --- разбор Virtual mcConfig -------------------------------------------------
+# Схема берётся из того же файла, что и генератор C-таблицы, поэтому тест
+# проверяет ровно тот блоб, который увидит настоящий VESC Tool.
+
+SCHEMA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "..", "compat", "vesc_protocol", "generated")
+
+
+def load_mcconf_schema(version="7.01"):
+    path = os.path.join(SCHEMA_DIR, f"mcconf_schema_{version.replace('.', '_')}.json")
+    with open(path) as f:
+        return json.load(f)
+
+
+def decode_float32_auto(raw: int) -> float:
+    e = (raw >> 23) & 0xFF
+    sig_i = raw & 0x7FFFFF
+    neg = bool(raw & (1 << 31))
+    sig = 0.0
+    if e != 0 or sig_i != 0:
+        sig = sig_i / (8388608.0 * 2.0) + 0.5
+        e -= 126
+    if neg:
+        sig = -sig
+    return sig * (2.0 ** e)
+
+
+def decode_mcconf(schema, payload: bytes) -> dict:
+    """Разобрать блоб так же, как ConfigParams::deSerialize."""
+    i = 1  # байт команды
+    sig = struct.unpack(">I", payload[i:i + 4])[0]
+    i += 4
+    if sig != schema["signature"]:
+        raise ValueError(f"сигнатура {sig} != {schema['signature']}")
+
+    out = {}
+    for p in schema["params"]:
+        kind, size, scale = p["kind"], p["size"], p["scale"]
+        chunk = payload[i:i + size]
+        i += size
+        if kind == "MC_KIND_DOUBLE16":
+            v = struct.unpack(">h", chunk)[0] / scale
+        elif kind == "MC_KIND_DOUBLE32":
+            v = struct.unpack(">i", chunk)[0] / scale
+        elif kind == "MC_KIND_DOUBLE32_AUTO":
+            v = decode_float32_auto(struct.unpack(">I", chunk)[0])
+        elif kind in ("MC_KIND_U8", "MC_KIND_BYTE"):
+            v = chunk[0]
+        elif kind == "MC_KIND_I8":
+            v = struct.unpack(">b", chunk)[0]
+        elif kind == "MC_KIND_U16":
+            v = struct.unpack(">H", chunk)[0]
+        elif kind == "MC_KIND_I16":
+            v = struct.unpack(">h", chunk)[0]
+        elif kind == "MC_KIND_U32":
+            v = struct.unpack(">I", chunk)[0]
+        elif kind == "MC_KIND_I32":
+            v = struct.unpack(">i", chunk)[0]
+        else:
+            raise ValueError(f"неизвестный вид {kind}")
+        out[p["name"]] = v
+    return out
+
+
 def qt_uncompress(blob: bytes) -> bytes:
     """qUncompress: 4 байта big-endian с размером + zlib."""
     expected = struct.unpack(">I", blob[:4])[0]
@@ -246,6 +315,43 @@ def main():
           f"версия протокола {fw['major']}.{fw['minor']:02d} известна VESC Tool")
     check(fw["cfg_num"] == 1, "объявлена одна пользовательская конфигурация")
     check(fw["qml_app"] == 1, "объявлен QML интерфейса приложения")
+
+    # ------------------------------------------------------- Virtual mcConfig
+    section("Virtual mcConfig (проекция FloatCore Config)")
+    schema = load_mcconf_schema("7.01")
+    mc_payload = link.recv_payload()
+    check(mc_payload[0] == COMM_GET_MCCONF,
+          "после FW_VERSION устройство само прислало COMM_GET_MCCONF")
+    info("при hw_type = CUSTOM_MODULE VESC Tool сам его не запрашивает")
+
+    mc = decode_mcconf(schema, mc_payload)
+    check(len(mc_payload) == schema["blob_size"] + 1,
+          f"размер блоба {len(mc_payload)} = схема {schema['blob_size']} + байт команды")
+
+    fixture = {
+        "si_battery_cells": (10, "Battery 10S"),
+        "l_current_max": (25.0, "Motor 25 A"),
+        "l_current_min": (-5.0, "Brake -5 A"),
+        "l_in_current_max": (15.0, "Input 15 A"),
+        "l_in_current_min": (0.0, "Regen 0 A"),
+        "l_temp_fet_start": (80.0, "FET Start 80 °C"),
+        "l_temp_fet_end": (100.0, "FET End 100 °C"),
+    }
+    for name, (expected, label) in fixture.items():
+        got = mc[name]
+        check(abs(got - expected) < 0.01, f"{label}: {name} = {got}")
+
+    # Явный запрос тоже обслуживается
+    mc2 = decode_mcconf(schema, link.request(bytes([COMM_GET_MCCONF]), COMM_GET_MCCONF))
+    check(mc2["l_current_max"] == mc["l_current_max"],
+          "явный COMM_GET_MCCONF даёт те же значения")
+
+    # Запись конфигурации мотора должна игнорироваться
+    link.send(bytes([COMM_SET_MCCONF]) + mc_payload[1:].replace(b"", b""))
+    link.send(bytes([COMM_ALIVE]))
+    mc3 = decode_mcconf(schema, link.request(bytes([COMM_GET_MCCONF]), COMM_GET_MCCONF))
+    check(mc3["l_current_max"] == 25.0,
+          f"после COMM_SET_MCCONF пределы не изменились ({mc3['l_current_max']} А)")
 
     # ---------------------------------------------------------------- 5. telemetry
     section("5. Realtime telemetry")

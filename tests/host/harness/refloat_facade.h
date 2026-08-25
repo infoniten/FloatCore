@@ -20,6 +20,12 @@ typedef struct {
     float setpoint, setpoint_target;
     float balance_current;
     float motor_erpm, motor_duty, motor_current;
+    // Пределы, которые Refloat прочитал через VESC_IF->get_cfg_float().
+    // Нужны, чтобы проверить: Virtual mcConfig показывает UI ровно их.
+    float motor_current_max, motor_current_min;
+    float motor_batt_current_max, motor_batt_current_min;
+    float mosfet_temp_max, motor_temp_max;
+    float lv_threshold, hv_threshold;
     bool darkride;
     bool traction_control;
     float imu_frequency, main_frequency;

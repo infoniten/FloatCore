@@ -12,7 +12,7 @@ VESC Tool / приложение  ──BLE/Wi-Fi──►  ESP32
                                          └─ Motor abstraction ──CAN──► VESC A + VESC B
 ```
 
-## Статус: Этап 0.4 — совместимость с VESC Tool
+## Статус: Этап 0.4.1 — совместимость с VESC Tool + Virtual mcConfig
 
 Реальный вывод на моторы не активирован, платы ESP32 ещё нет. Готово:
 
@@ -21,7 +21,10 @@ VESC Tool / приложение  ──BLE/Wi-Fi──►  ESP32
   на десктопе**;
 * **мост к официальному VESC Tool**: оригинальный протокол VESC поверх TCP,
   идентификация FloatCore, телеметрия, отдача интерфейса Refloat и работа с
-  конфигурацией.
+  конфигурацией;
+* **Virtual mcConfig** — read-only проекция ограничений FloatCore в формат
+  Motor Configuration, благодаря которой шкалы и пороги в Refloat UI
+  соответствуют реальной системе, а не значениям по умолчанию VESC Tool.
 
 Своего приложения, GUI и конфигуратора у проекта нет — интерфейсом служит
 официальный VESC Tool.
@@ -71,14 +74,17 @@ Refloat не защищает себя сам — это обязанность 
 | [docs/vesc_tool_compat_architecture.md](docs/vesc_tool_compat_architecture.md) | Архитектура моста: слои, модель потоков, единая модель конфигурации, идентификация, барьеры безопасности |
 | [docs/refloat_qml_dependencies.md](docs/refloat_qml_dependencies.md) | Карта QML → backend → команда → обработчик; как Refloat UI попадает в VESC Tool без изменений |
 | [docs/unsupported_commands.md](docs/unsupported_commands.md) | Что не реализовано, почему и как это проявляется |
+| [docs/virtual_mcconfig.md](docs/virtual_mcconfig.md) | Полный аудит обращений Refloat QML к `mcConfig`, назначение и границы Virtual mcConfig |
+| [docs/mcconfig_mapping.md](docs/mcconfig_mapping.md) | FloatCore Config → Virtual mcConfig → QML: таблица отображения и обоснование правил агрегации двух ESC |
+| [docs/mcconfig_protocol.md](docs/mcconfig_protocol.md) | Обработчики протокола, сигнатура схемы, кодирование параметров, гарантия read-only |
 
 ## Сборка и тесты
 
 ```bash
 git submodule update --init
 make                # host-тесты, протокольные тесты, FloatCore Host
-make test           # протокольные тесты (71) + сценарии Refloat (10)
-make test-all       # то же + интеграционный прогон по настоящему сокету (25 проверок)
+make test           # протокольные тесты (102) + сценарии Refloat (11)
+make test-all       # то же + интеграционный прогон по настоящему сокету (36 проверок)
 ```
 
 Либо в контейнере: `docker build -t refloat-host . && docker run --rm refloat-host`.
@@ -95,7 +101,15 @@ make host                      # или: build/floatcore_host --trace
 В VESC Tool: **Connection → TCP → 127.0.0.1 : 65102 → Connect**.
 
 Устройство представится как `FloatCore` (`HW_TYPE_CUSTOM_MODULE`), отдаст
-интерфейс Refloat и его схему конфигурации. Управление моторами заблокировано
+интерфейс Refloat, его схему конфигурации и Virtual mcConfig.
+
+Схема Motor Configuration зависит от версии вашего VESC Tool:
+
+```bash
+build/floatcore_host --mcconf-schema 6.06   # для VESC Tool 6.06
+build/floatcore_host --mcconf-schema 7.01   # по умолчанию
+build/floatcore_host --no-mcconf            # отключить, если версия другая
+``` Управление моторами заблокировано
 в диспетчере команд, за `LogicalMotor` стоит mock, драйвера CAN не существует —
 вывод на моторы физически невозможен.
 

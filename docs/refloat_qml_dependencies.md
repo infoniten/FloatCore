@@ -19,7 +19,7 @@
 | `vescCommands.sendCustomAppData(buf)` (13 мест) | `Commands::sendCustomAppData()` | `COMM_CUSTOM_APP_DATA` | `custom_app.c` → `set_app_data_handler` Refloat | ✅ |
 | `vescCommands.customAppDataReceived` | сигнал `Commands` | `COMM_CUSTOM_APP_DATA` (обратно) | `send_app_data` Refloat → `vesc_server_send_custom_app_data` | ✅ |
 | `VescIf.getLastFwRxParams()` | сохранённые `FW_RX_PARAMS` | `COMM_FW_VERSION` | `firmware_info.c` | ✅ |
-| `VescIf.mcConfig()` | `ConfigParams` конфигурации мотора | `COMM_GET_MCCONF` | **не реализуется** | ⚠ см. §3 |
+| `VescIf.mcConfig()` | `ConfigParams` конфигурации мотора | `COMM_GET_MCCONF` | `virtual_mcconf.c` — read-only проекция FloatCore Config | ✅ с версии 0.4.1 |
 | `VescIf.emitStatusMessage()` (6) | строка состояния VESC Tool | — | локально | ✅ |
 | `VescIf.emitMessageDialog()` (2) | диалог VESC Tool | — | локально | ✅ |
 | `VescIf.useImperialUnits()`, `storeSettings()` | настройки VESC Tool | — | локально | ✅ |
@@ -57,37 +57,23 @@ VESC Packages — но там и нечего показывать, пакет �
 Проверено в `tests/host_integration/vesc_tool_sim.py`: QML забирается целиком,
 распаковывается, содержит `tabTitle: "Refloat"` и корректные подстановки версии.
 
-## 3. Единственная неточность: `VescIf.mcConfig()`
+## 3. `VescIf.mcConfig()` — закрыто в версии 0.4.1
 
-`ui.qml.in:240-249` читает из конфигурации мотора:
+`ui.qml.in:240-249` читает из конфигурации мотора семь параметров: пределы
+токов, пороги температур и число ячеек батареи. Раньше FloatCore их не отдавал,
+и VESC Tool подставлял собственные значения по умолчанию — шкалы не
+соответствовали реальным ограничениям.
 
-```qml
-property int  batteryCells   = mcConfig.getParamInt("si_battery_cells")
-property real tempMotorStart = mcConfig.getParamDouble("l_temp_motor_start")
-property real tempFetStart   = mcConfig.getParamDouble("l_temp_fet_start")
-property real currentMin     = mcConfig.getParamDouble("l_current_min")
-property real currentMax     = mcConfig.getParamDouble("l_current_max")
-property real inCurrentMin   = mcConfig.getParamDouble("l_in_current_min")
-property real inCurrentMax   = mcConfig.getParamDouble("l_in_current_max")
-```
+Теперь FloatCore отдаёт **Virtual mcConfig** — read-only проекцию своей
+конфигурации в формате Motor Configuration VESC. Полный аудит и обоснование:
+[virtual_mcconfig.md](virtual_mcconfig.md), отображение параметров:
+[mcconfig_mapping.md](mcconfig_mapping.md), протокол:
+[mcconfig_protocol.md](mcconfig_protocol.md).
 
-Это границы шкал и порогов на экранах Refloat. FloatCore не отдаёт `mcconf`
-(hw_type = CUSTOM_MODULE), поэтому VESC Tool подставит значения из своей
-локальной схемы конфигурации, а не с устройства. Последствие: шкалы токов,
-температур и уровень заряда по числу ячеек могут отображаться относительно
-не тех пределов, что настроены в реальных FSESC.
-
-На балансировку это не влияет: те же величины Refloat берёт напрямую через
-`VESC_IF->get_cfg_float()`, а не из QML.
-
-Варианты закрытия, в порядке предпочтения:
-
-1. **Ничего не делать в v1.** Косметика, видна только в UI.
-2. Реализовать `COMM_GET_MCCONF` с mcconf-совместимым блобом, оставаясь
-   CUSTOM_MODULE. Дорого: формат mcconf версионный и большой.
-3. Патч в `ui.qml.in`, берущий пределы из конфигурации Refloat. Нарушает
-   принцип «не менять QML», зато точен. Кандидат, если пользователи будут
-   путаться в шкалах.
+Отдельно стоит отметить: `si_battery_cells` оказался не только отображаемым.
+Миграция тюна 1.1 (`ui.qml.in:1400-1406`) делит на него пороги `tiltback_hv`
+и `tiltback_lv`, то есть неверное число ячеек попадало бы в записываемую
+конфигурацию и меняло пороги напряжения.
 
 ## 4. Отличия десктопной и мобильной оболочек
 

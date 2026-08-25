@@ -7,6 +7,7 @@
 
 #include "mock_vesc_if.h"
 #include "vesc_c_if.h"
+#include "../../../compat/config/floatcore_limits.h"
 #include "../../../compat/motor/logical_motor.h"
 
 #include <math.h>
@@ -81,6 +82,7 @@ static struct {
     int (*cfg_get_xml)(uint8_t **data);
 
     char eeprom_autosave[512];
+    bool cfg_from_limits;
     void (*log_sink)(const char *fmt, va_list ap);
     bool io_pin_state[16];
 } M;
@@ -475,10 +477,37 @@ static volatile gnss_data *if_mc_gnss(void) {
 // ------------------------------------------------------------------ конфигурация
 
 static float if_get_cfg_float(CFG_PARAM p) {
+    if (M.cfg_from_limits) {
+        switch (p) {
+        case CFG_PARAM_l_current_max:
+            return fc_effective_current_max();
+        case CFG_PARAM_l_current_min:
+            return fc_effective_current_min();
+        case CFG_PARAM_l_in_current_max:
+            return fc_effective_in_current_max();
+        case CFG_PARAM_l_in_current_min:
+            return fc_effective_in_current_min();
+        case CFG_PARAM_l_temp_fet_start:
+            return fc_effective_temp_fet_start();
+        case CFG_PARAM_l_temp_fet_end:
+            return fc_effective_temp_fet_end();
+        case CFG_PARAM_l_temp_motor_start:
+            return fc_effective_temp_motor_start();
+        case CFG_PARAM_l_temp_motor_end:
+            return fc_effective_temp_motor_end();
+        case CFG_PARAM_l_max_duty:
+            return fc_effective_max_duty();
+        default:
+            break;
+        }
+    }
     return ((size_t) p < 64) ? M.cfg_float[p] : 0.0f;
 }
 
 static int if_get_cfg_int(CFG_PARAM p) {
+    if (M.cfg_from_limits && p == CFG_PARAM_si_battery_cells) {
+        return fc_battery_cell_count();
+    }
     return ((size_t) p < 64) ? M.cfg_int[p] : 0;
 }
 
@@ -950,6 +979,10 @@ void mock_eeprom_set_autosave(const char *path) {
         return;
     }
     snprintf(M.eeprom_autosave, sizeof(M.eeprom_autosave), "%s", path);
+}
+
+void mock_cfg_use_floatcore_limits(bool enable) {
+    M.cfg_from_limits = enable;
 }
 
 void mock_cfg_set_float(int p, float v) {

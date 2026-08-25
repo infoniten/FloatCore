@@ -163,6 +163,24 @@ static void handle_payload(void *ctx, const uint8_t *payload, size_t len) {
     switch (cmd) {
     case COMM_FW_VERSION: {
         reply(s, firmware_info_encode(&s->fw, s->scratch, sizeof(s->scratch)));
+        // Запрос версии — единственный надёжный признак «VESC Tool подключился».
+        if (s->mcconf_push_on_connect) {
+            vesc_server_send_mcconf(s, false);
+        }
+        return;
+    }
+
+    case COMM_GET_MCCONF:
+    case COMM_GET_MCCONF_DEFAULT: {
+        vesc_server_send_mcconf(s, cmd == COMM_GET_MCCONF_DEFAULT);
+        return;
+    }
+
+    case COMM_SET_MCCONF: {
+        // Virtual mcConfig — только чтение. Настоящие ограничения FloatCore
+        // через этот путь изменить нельзя ни при каких обстоятельствах.
+        ++s->stats.mcconf_writes_rejected;
+        trace(s, "!!", cmd, len, "motor config write IGNORED (Virtual mcConfig is read-only)");
         return;
     }
 
@@ -338,4 +356,26 @@ bool vesc_server_send_custom_app_data(VescServer *s, const uint8_t *data, size_t
 
 void vesc_server_set_trace(VescServer *s, bool on) {
     s->trace = on;
+}
+
+bool vesc_server_send_mcconf(VescServer *s, bool is_default) {
+    if (!s->mcconf_provider) {
+        ++s->stats.unsupported_commands;
+        return false;
+    }
+
+    const McConfSchema *schema = s->mcconf_schema ? s->mcconf_schema
+                                                  : virtual_mcconf_default_schema();
+
+    // Проекция строится заново на каждый запрос: Virtual mcConfig ничего не хранит.
+    VirtualMcConfValues values;
+    memset(&values, 0, sizeof(values));
+    s->mcconf_provider(s->ctx, &values);
+
+    size_t n = virtual_mcconf_encode(schema, &values, is_default, s->scratch, sizeof(s->scratch));
+    if (n == 0) {
+        return false;
+    }
+    ++s->stats.mcconf_sent;
+    return reply(s, n);
 }

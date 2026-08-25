@@ -7,10 +7,12 @@
 // Главное требование: парсер не падает, не зависает и не выходит за границы
 // буфера ни при каком входе.
 
+#include "../../compat/config/floatcore_limits.h"
 #include "../../compat/vesc_protocol/commands.h"
 #include "../../compat/vesc_protocol/packet.h"
 #include "../../compat/vesc_protocol/vesc_buffer.h"
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -730,6 +732,313 @@ static void test_server_fuzz(void) {
     check(s.stats.rx_frames == 20000, "все кадры обработаны (%u)", s.stats.rx_frames);
 }
 
+
+// ------------------------------------------------------- Virtual mcConfig
+
+/** Фикстура из ТЗ v0.4.1 §8. */
+static void apply_fixture(void) {
+    floatcore_limits_init();
+
+    FcSourceLimits fc = {
+        .present = true,
+        .current_max = 25.0f,      // Motor       25 A
+        .current_min = -5.0f,      // Brake       -5 A
+        .in_current_max = 15.0f,   // Input       15 A
+        .in_current_min = 0.0f,    // Regen        0 A
+        .temp_fet_start = 80.0f,   // FET Start   80 °C
+        .temp_fet_end = 100.0f,    // FET End    100 °C
+        .temp_motor_start = 80.0f,
+        .temp_motor_end = 100.0f,
+        .max_duty = 0.95f,
+    };
+    floatcore_limits_set_floatcore(&fc);
+
+    FcBatteryConfig batt = {.cell_count = 10, .cell_v_min = 3.0f, .cell_v_max = 4.2f};
+    floatcore_limits_set_battery(&batt);
+}
+
+static void fixture_provider(void *ctx, VirtualMcConfValues *out) {
+    (void) ctx;
+    out->si_battery_cells = fc_battery_cell_count();
+    out->l_current_max = fc_effective_current_max();
+    out->l_current_min = fc_effective_current_min();
+    out->l_in_current_max = fc_effective_in_current_max();
+    out->l_in_current_min = fc_effective_in_current_min();
+    out->l_temp_fet_start = fc_effective_temp_fet_start();
+    out->l_temp_fet_end = fc_effective_temp_fet_end();
+    out->l_temp_motor_start = fc_effective_temp_motor_start();
+    out->l_temp_motor_end = fc_effective_temp_motor_end();
+}
+
+/** Декодер блоба по той же схеме: проверяет порядок, размеры и значения. */
+static bool decode_mcconf_param(
+    const McConfSchema *schema, const uint8_t *payload, size_t len, const char *name, double *out
+) {
+    size_t ind = 1;  // байт команды
+    if (len < 5) {
+        return false;
+    }
+    uint32_t sig = vb_get_uint32(payload, &ind);
+    if (sig != schema->signature) {
+        return false;
+    }
+
+    for (uint16_t i = 0; i < schema->param_count; ++i) {
+        const McParam *p = &schema->params[i];
+        double value = 0;
+        switch ((McParamKind) p->kind) {
+        case MC_KIND_DOUBLE16:
+            value = (double) vb_get_int16(payload, &ind) / p->scale;
+            break;
+        case MC_KIND_DOUBLE32:
+            value = (double) vb_get_int32(payload, &ind) / p->scale;
+            break;
+        case MC_KIND_DOUBLE32_AUTO: {
+            uint32_t res = vb_get_uint32(payload, &ind);
+            int e = (int) ((res >> 23) & 0xFF);
+            uint32_t sig_i = res & 0x7FFFFF;
+            bool neg = (res & (1u << 31)) != 0;
+            double sg = 0.0;
+            if (e != 0 || sig_i != 0) {
+                sg = (double) sig_i / (8388608.0 * 2.0) + 0.5;
+                e -= 126;
+            }
+            if (neg) {
+                sg = -sg;
+            }
+            value = ldexp(sg, e);
+        } break;
+        case MC_KIND_U8:
+        case MC_KIND_BYTE:
+            value = vb_get_uint8(payload, &ind);
+            break;
+        case MC_KIND_I8:
+            value = vb_get_int8(payload, &ind);
+            break;
+        case MC_KIND_U16:
+            value = vb_get_uint16(payload, &ind);
+            break;
+        case MC_KIND_I16:
+            value = vb_get_int16(payload, &ind);
+            break;
+        case MC_KIND_U32:
+            value = vb_get_uint32(payload, &ind);
+            break;
+        case MC_KIND_I32:
+            value = vb_get_int32(payload, &ind);
+            break;
+        }
+        if (strcmp(p->name, name) == 0) {
+            *out = value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void test_virtual_mcconf(void) {
+    section("Virtual mcConfig: проекция FloatCore Config");
+
+    apply_fixture();
+
+    VescServer s;
+    server_setup(&s);
+    s.mcconf_provider = fixture_provider;
+    s.mcconf_schema = virtual_mcconf_default_schema();
+
+    info("схема по умолчанию: VESC Tool %s, %u параметров, блоб %u байт, сигнатура %u",
+         s.mcconf_schema->version, s.mcconf_schema->param_count, s.mcconf_schema->blob_size,
+         s.mcconf_schema->signature);
+
+    uint8_t rep[VESC_PACKET_MAX_PL_LEN];
+    uint8_t req = COMM_GET_MCCONF;
+    size_t n = server_request(&s, &req, 1, rep, sizeof(rep));
+
+    check(n == (size_t) s.mcconf_schema->blob_size + 1u,
+          "размер ответа совпадает со схемой (%zu байт)", n);
+    check(rep[0] == COMM_GET_MCCONF, "идентификатор ответа COMM_GET_MCCONF");
+
+    size_t ind = 1;
+    uint32_t sig = vb_get_uint32(rep, &ind);
+    check(sig == s.mcconf_schema->signature,
+          "сигнатура %u совпадает со схемой — VESC Tool примет конфигурацию", sig);
+
+    struct {
+        const char *name;
+        double expect;
+        const char *label;
+    } expected[] = {
+        {"si_battery_cells", 10, "Battery 10S"},
+        {"l_current_max", 25.0, "Motor 25 A"},
+        {"l_current_min", -5.0, "Brake -5 A"},
+        {"l_in_current_max", 15.0, "Input 15 A"},
+        {"l_in_current_min", 0.0, "Regen 0 A"},
+        {"l_temp_fet_start", 80.0, "FET Start 80 °C"},
+        {"l_temp_fet_end", 100.0, "FET End 100 °C"},
+        {"l_temp_motor_start", 80.0, "Motor Start 80 °C"},
+        {"l_temp_motor_end", 100.0, "Motor End 100 °C"},
+    };
+
+    for (size_t i = 0; i < sizeof(expected) / sizeof(expected[0]); ++i) {
+        double got = 0;
+        bool ok = decode_mcconf_param(s.mcconf_schema, rep, n, expected[i].name, &got);
+        check(ok && fabs(got - expected[i].expect) < 0.01,
+              "%s → %s = %.3f (ожидалось %.3f)", expected[i].label, expected[i].name, got,
+              expected[i].expect);
+    }
+
+    // Значения по умолчанию не должны содержать проекции
+    req = COMM_GET_MCCONF_DEFAULT;
+    n = server_request(&s, &req, 1, rep, sizeof(rep));
+    double def_imax = 0;
+    decode_mcconf_param(s.mcconf_schema, rep, n, "l_current_max", &def_imax);
+    check(rep[0] == COMM_GET_MCCONF_DEFAULT && fabs(def_imax - 25.0) > 0.01,
+          "COMM_GET_MCCONF_DEFAULT отдаёт значения схемы (%.1f А), а не проекцию", def_imax);
+
+    // Все схемы должны кодироваться и совпадать по размеру
+    for (size_t i = 0; i < virtual_mcconf_schema_count(); ++i) {
+        const McConfSchema *sc = virtual_mcconf_schema_at(i);
+        VirtualMcConfValues v;
+        memset(&v, 0, sizeof(v));
+        fixture_provider(NULL, &v);
+        uint8_t buf[VESC_PACKET_MAX_PL_LEN];
+        size_t len = virtual_mcconf_encode(sc, &v, false, buf, sizeof(buf));
+        double imax = 0;
+        bool ok = decode_mcconf_param(sc, buf, len, "l_current_max", &imax);
+        check(len == (size_t) sc->blob_size + 1u && ok && fabs(imax - 25.0) < 0.01,
+              "схема %s: %zu байт, l_current_max = %.1f", sc->version, len, imax);
+        check(len + 5 <= VESC_PACKET_BUFFER_LEN,
+              "схема %s помещается в один пакет VESC", sc->version);
+    }
+}
+
+static void test_mcconf_aggregation(void) {
+    section("Virtual mcConfig: агрегация двух ESC");
+
+    apply_fixture();
+
+    // ESC A разрешает больше, ESC B — меньше. Ожидаем самое консервативное.
+    FcSourceLimits a = {
+        .present = true,
+        .current_max = 40.0f,
+        .current_min = -20.0f,
+        .in_current_max = 30.0f,
+        .in_current_min = -10.0f,
+        .temp_fet_start = 90.0f,
+        .temp_fet_end = 110.0f,
+        .temp_motor_start = 90.0f,
+        .temp_motor_end = 110.0f,
+        .max_duty = 0.95f,
+    };
+    FcSourceLimits b = a;
+    b.current_max = 18.0f;
+    b.current_min = -3.0f;
+    b.in_current_max = 12.0f;
+    b.in_current_min = -2.0f;
+    b.temp_fet_start = 75.0f;
+
+    floatcore_limits_set_esc(0, &a);
+    floatcore_limits_set_esc(1, &b);
+
+    check(fabsf(fc_effective_current_max() - 18.0f) < 0.001f,
+          "ток мотора = min(40, 18, 25) = %.1f А, а не сумма", fc_effective_current_max());
+    check(fabsf(fc_effective_current_min() - (-3.0f)) < 0.001f,
+          "тормозной ток = ближайший к нулю из (-20, -3, -5) = %.1f А",
+          fc_effective_current_min());
+    check(fabsf(fc_effective_in_current_max() - 12.0f) < 0.001f,
+          "ток батареи = min(30, 12, 15) = %.1f А, а не сумма", fc_effective_in_current_max());
+    check(fabsf(fc_effective_in_current_min() - 0.0f) < 0.001f,
+          "рекуперация = ближайшая к нулю из (-10, -2, 0) = %.1f А",
+          fc_effective_in_current_min());
+    check(fabsf(fc_effective_temp_fet_start() - 75.0f) < 0.001f,
+          "порог температуры = min(90, 75, 80) = %.0f °C, а не максимум",
+          fc_effective_temp_fet_start());
+
+    // Отсутствующий ESC не участвует в агрегации
+    FcSourceLimits absent = b;
+    absent.present = false;
+    floatcore_limits_set_esc(1, &absent);
+    check(fabsf(fc_effective_current_max() - 25.0f) < 0.001f,
+          "ESC вне связи исключается: min(40, 25) = %.1f А", fc_effective_current_max());
+
+    apply_fixture();
+}
+
+static void test_mcconf_readonly(void) {
+    section("Virtual mcConfig: только чтение");
+
+    apply_fixture();
+    VescServer s;
+    server_setup(&s);
+    s.mcconf_provider = fixture_provider;
+
+    float before = fc_effective_current_max();
+
+    // Попытка записать конфигурацию мотора: полный блоб с другим током
+    uint8_t req[VESC_PACKET_MAX_PL_LEN];
+    VirtualMcConfValues evil;
+    memset(&evil, 0, sizeof(evil));
+    evil.l_current_max = 200.0f;
+    evil.si_battery_cells = 30;
+    size_t n = virtual_mcconf_encode(
+        virtual_mcconf_default_schema(), &evil, false, req, sizeof(req)
+    );
+    req[0] = COMM_SET_MCCONF;
+
+    uint8_t rep[VESC_PACKET_MAX_PL_LEN];
+    size_t rn = server_request(&s, req, n, rep, sizeof(rep));
+
+    check(rn == 0, "на COMM_SET_MCCONF ответа нет");
+    check(s.stats.mcconf_writes_rejected == 1, "попытка записи посчитана (%u)",
+          s.stats.mcconf_writes_rejected);
+    check(fabsf(fc_effective_current_max() - before) < 0.001f,
+          "пределы FloatCore не изменились: %.1f А", fc_effective_current_max());
+
+    // Без провайдера сервер молчит, а не падает
+    VescServer s2;
+    server_setup(&s2);
+    s2.mcconf_provider = NULL;
+    uint8_t get = COMM_GET_MCCONF;
+    rn = server_request(&s2, &get, 1, rep, sizeof(rep));
+    check(rn == 0, "без провайдера Virtual mcConfig ответа нет");
+}
+
+static void test_mcconf_push_on_connect(void) {
+    section("Virtual mcConfig: инициативная отправка после FW_VERSION");
+
+    apply_fixture();
+    VescServer s;
+    server_setup(&s);
+    s.mcconf_provider = fixture_provider;
+    s.mcconf_push_on_connect = true;
+
+    capture_reset();
+    uint8_t req = COMM_FW_VERSION;
+    uint8_t buf[VESC_PACKET_BUFFER_LEN];
+    size_t fn = frame(&req, 1, buf);
+    vesc_server_feed(&s, buf, fn);
+
+    check(g_tx.frames == 2, "на запрос версии отправлено 2 кадра (%zu)", g_tx.frames);
+    check(s.stats.mcconf_sent == 1, "Virtual mcConfig отправлен без запроса (%u)",
+          s.stats.mcconf_sent);
+    info("нужно потому, что при hw_type = CUSTOM_MODULE VESC Tool сам mcconf не запрашивает");
+
+    // Разобрать второй кадр и убедиться, что это mcconf с нашей проекцией
+    VescPacket parser;
+    vesc_packet_init(&parser, NULL, capture_process, NULL);
+    g_payloads = 0;
+    vesc_packet_process_buffer(&parser, g_tx.data, g_tx.len);
+    check(g_payloads == 2 && g_last_payload[0] == COMM_GET_MCCONF,
+          "второй кадр — COMM_GET_MCCONF");
+
+    double cells = 0;
+    bool ok = decode_mcconf_param(
+        virtual_mcconf_default_schema(), g_last_payload, g_last_payload_len, "si_battery_cells",
+        &cells
+    );
+    check(ok && (int) cells == 10, "в нём проекция FloatCore: ячеек = %d", (int) cells);
+}
+
 int main(void) {
     printf("\nFloatCore protocol tests — только compat/vesc_protocol, без платформы\n");
     printf("================================================================\n");
@@ -748,6 +1057,10 @@ int main(void) {
     test_server_custom_app();
     test_server_safety_and_unknown();
     test_server_fuzz();
+    test_virtual_mcconf();
+    test_mcconf_aggregation();
+    test_mcconf_readonly();
+    test_mcconf_push_on_connect();
 
     printf("\n================================================================\n");
     if (failures == 0) {

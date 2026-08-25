@@ -7,6 +7,7 @@
 
 #include "scenarios.h"
 
+#include "../../compat/config/floatcore_limits.h"
 #include "logical_motor_mock.h"
 #include "mock_vesc_if.h"
 #include "refloat_facade.h"
@@ -407,6 +408,66 @@ static bool sc_nan_imu_sample(void) {
     return true;
 }
 
+// 11. Единый источник истины: Refloat и Virtual mcConfig читают одни пределы.
+static bool sc_shared_limits(void) {
+    // Фикстура из ТЗ v0.4.1 §8
+    floatcore_limits_init();
+    FcSourceLimits fc = {
+        .present = true,
+        .current_max = 25.0f,
+        .current_min = -5.0f,
+        .in_current_max = 15.0f,
+        .in_current_min = 0.0f,
+        .temp_fet_start = 80.0f,
+        .temp_fet_end = 100.0f,
+        .temp_motor_start = 80.0f,
+        .temp_motor_end = 100.0f,
+        .max_duty = 0.95f,
+    };
+    floatcore_limits_set_floatcore(&fc);
+    FcBatteryConfig batt = {.cell_count = 10, .cell_v_min = 3.0f, .cell_v_max = 4.2f};
+    floatcore_limits_set_battery(&batt);
+
+    if (!boot()) {
+        return false;
+    }
+    // Refloat должен читать пределы из FloatCore Config, а не из внутренних
+    // умолчаний mock-платформы.
+    mock_cfg_use_floatcore_limits(true);
+    run_for(1.0f);  // aux-поток перечитывает конфигурацию мотора раз в 0.5 с
+
+    RefloatSnapshot s = refloat_facade_snapshot();
+    // motor_data хранит нижние пределы по модулю
+    t_info("Refloat прочитал: ток %.1f А / тормоз %.1f А, батарея %.1f А / рекуп %.1f А, "
+           "MOSFET %.0f °C",
+           s.motor_current_max, s.motor_current_min, s.motor_batt_current_max,
+           s.motor_batt_current_min, s.mosfet_temp_max);
+
+    t_check(fabsf(s.motor_current_max - fc_effective_current_max()) < 0.01f,
+            "ток мотора Refloat = проекция Virtual mcConfig (%.1f А)", s.motor_current_max);
+    // motor_data хранит модуль минимального тока
+    t_check(fabsf(s.motor_current_min - fabsf(fc_effective_current_min())) < 0.01f,
+            "тормозной ток совпадает (%.1f А)", s.motor_current_min);
+    t_check(fabsf(s.motor_batt_current_max - fc_effective_in_current_max()) < 0.01f,
+            "ток батареи совпадает (%.1f А)", s.motor_batt_current_max);
+    // Refloat вычитает 3 °C запаса из порога прошивки
+    t_check(fabsf(s.mosfet_temp_max - (fc_effective_temp_fet_start() - 3.0f)) < 0.01f,
+            "порог MOSFET = %.0f °C (порог %.0f − 3 °C запаса Refloat)", s.mosfet_temp_max,
+            fc_effective_temp_fet_start());
+    t_info("те же значения уходят в VESC Tool: отдельного хранилища параметров нет");
+
+    // Порог LV масштабируется по числу ячеек из той же конфигурации батареи
+    t_info("порог LV = %.1f В при %u ячейках", s.lv_threshold,
+           (unsigned) fc_battery_cell_count());
+    t_check(s.lv_threshold > 0.0f && s.lv_threshold < 4.3f * fc_battery_cell_count(),
+            "порог LV пересчитан по числу ячеек FloatCore Config");
+
+    shutdown();
+    mock_cfg_use_floatcore_limits(false);
+    floatcore_limits_init();
+    return true;
+}
+
 const Scenario SCENARIOS[] = {
     {"1. board level", sc_board_level},
     {"2. nose-up", sc_nose_up},
@@ -418,6 +479,7 @@ const Scenario SCENARIOS[] = {
     {"8. ESC B timeout", sc_esc_b_timeout},
     {"9. injected VESC fault", sc_injected_fault},
     {"10. NaN IMU sample", sc_nan_imu_sample},
+    {"11. единый источник пределов", sc_shared_limits},
 };
 
 const size_t SCENARIO_COUNT = sizeof(SCENARIOS) / sizeof(SCENARIOS[0]);

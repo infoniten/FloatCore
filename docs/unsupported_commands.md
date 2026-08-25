@@ -46,11 +46,16 @@ RX  id=6   SET_CURRENT              len=5
 !!  id=6   SET_CURRENT              len=5  motor command BLOCKED (mock backend, no CAN output)
 ```
 
+`COMM_GET_MCCONF` (14) и `COMM_GET_MCCONF_DEFAULT` (15) с версии 0.4.1
+**реализованы** — они отдают Virtual mcConfig, read-only проекцию FloatCore
+Config (см. `docs/mcconfig_protocol.md`).
+
 ## Известные, но не реализованные
 
 | Команда | ID | Почему не нужна | Последствие |
 |---|---|---|---|
-| `COMM_GET_MCCONF` / `_DEFAULT` / `COMM_SET_MCCONF` | 13–15 | FloatCore не контроллер мотора; при hw_type = CUSTOM_MODULE VESC Tool их не запрашивает | Шкалы в Refloat UI берутся из локальных значений VESC Tool (см. `refloat_qml_dependencies.md` §3) |
+| `COMM_SET_MCCONF` | 13 | **Реализован как явный отказ.** Virtual mcConfig — только чтение, менять ограничения FloatCore снаружи нельзя | Счётчик `mcconf_writes_rejected`, ответа нет, пределы не меняются |
+| `COMM_GET_MCCONF_TEMP`, `COMM_SET_MCCONF_TEMP` | 91, 48 | Временные профили конфигурации; Refloat QML их не читает | — |
 | `COMM_GET_APPCONF` / `_DEFAULT` / `COMM_SET_APPCONF` | 16–18 | То же | Страница App Settings пуста |
 | `COMM_JUMP_TO_BOOTLOADER`, `COMM_ERASE_NEW_APP`, `COMM_WRITE_NEW_APP_DATA` | 1–3 | Обновление прошивки через VESC Tool не входит в задачу | Страница Firmware неработоспособна |
 | `COMM_TERMINAL_CMD` | 20 | Терминала у FloatCore нет | Команды терминала без ответа |

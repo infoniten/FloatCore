@@ -61,6 +61,16 @@ RefloatSnapshot refloat_facade_snapshot(void) {
     s.motor_duty = d->motor.duty_cycle.value;
     s.motor_current = d->motor.current;
 
+    s.motor_current_max = d->motor.current_max;
+    s.motor_current_min = d->motor.current_min;
+    s.motor_batt_current_max = d->motor.battery_current_max;
+    s.motor_batt_current_min = d->motor.battery_current_min;
+    // Refloat вычитает 3 °C из порога прошивки, храним как есть
+    s.mosfet_temp_max = d->motor.mosfet_temp_max;
+    s.motor_temp_max = d->motor.motor_temp_max;
+    s.lv_threshold = d->motor.lv_threshold;
+    s.hv_threshold = d->motor.hv_threshold;
+
     s.imu_frequency = d->imu_freq_tracker.filter_frequency;
     s.main_frequency = d->main_freq_tracker.filter_frequency;
     return s;
