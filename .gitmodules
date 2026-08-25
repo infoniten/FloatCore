@@ -1,0 +1,3 @@
+[submodule "refloat-upstream"]
+	path = refloat-upstream
+	url = https://github.com/lukash/refloat.git
