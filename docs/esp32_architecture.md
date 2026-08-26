@@ -11,7 +11,7 @@ Strategy B ([porting_strategy.md](porting_strategy.md)).
 
 ---
 
-## 0. Что реализовано на v0.5
+## 0. Что реализовано на v0.6A
 
 Собрано и проверено на ESP32-D0WD-V3 rev v3.1 (ESP-IDF v5.5.5).
 
@@ -21,31 +21,66 @@ refloat-upstream/src              неизменённый Refloat 1.3.0 (47a2c5
 compat/vesc_api/vesc_c_if.h       общий shim: VESC_IF -> floatcore_vesc_if
 compat/refloat_glue/              общий путь запуска: refloat_init()
         │
+compat/safety/                    Supervisor, Motor Gate, диагностика IMU
+        │                         (платформенно-нейтральны, 61 host-тест)
 platform/esp32/main/fc_vesc_if.c  реализация VESC_IF поверх FreeRTOS
         ├── fc_imu_mock.c         mock-IMU 500 Гц, задаёт ритм контура
+        ├── fc_imu_real.c         задача чтения ICM-20948 (в контур НЕ идёт)
+        ├── drivers/icm20948.c    драйвер датчика: сырые оси, без mapping
         ├── fc_adc_safe.c         footpad всегда disengaged
-        ├── fc_motor_blocked.c    logical_motor.h -> BLOCKED, CAN отсутствует
-        ├── fc_storage_nvs.c      eeprom_var -> NVS
-        ├── fc_timing.c           статистика периодов по esp_timer
+        ├── fc_storage_nvs.c      eeprom_var -> NVS, запись вне realtime
+        ├── fc_timing.c           периоды, перцентили, время исполнения
+        ├── fc_supervisor_task.c  сбор входов супервизора, 100 Гц
+        ├── fc_safety_report.c    периодическая сводка безопасности
+        ├── fc_can_absent.c       единственное упоминание CAN — строка статуса
         ├── fc_led_driver.c       замена led_driver.c (STM32) -> заглушка
-        └── fc_console.c          read-only диагностика
+        └── fc_console.c          диагностика, классифицированная по риску
         │
-ESP-IDF / FreeRTOS                tick 1000 Гц, TWDT, panic-halt
+ESP-IDF / FreeRTOS                tick 1000 Гц, TWDT, panic-halt, LAB_SAFE
 ```
+
+### Приоритеты задач, как они есть сейчас
+
+| Задача | Ядро | Приоритет | Период |
+|---|---|---|---|
+| `fc_super` | 1 | 15 | 100 Гц |
+| `fc_imu` (контур, mock) | 1 | 14 | 500 Гц |
+| `fc_imu_hw` (чтение ICM-20948) | 1 | 13 | 500 Гц |
+| `Refloat Main` | 1 | 12 | ~441 Гц фактически |
+| `Refloat Aux` | 1 | 10 | ~29.6 Гц фактически |
+| `fc_console`, `fc_report`, `fc_nvs` | 0 | 4, 3, 3 | по событию |
+
+Супервизор выше контура намеренно: он обязан отработать даже при перегрузке.
+Проверено, что на джиттер это не влияет (`realtime_timing.md` §3, гипотеза 2).
 
 | Раздел | Проект | Состояние v0.5 |
 |---|---|---|
 | §2 задачи и приоритеты | 6 задач, супервизор | реализованы 3: `fc_imu` (prio 14), `Refloat Main` (12), `Refloat Aux` (10), все на ядре 1. Супервизора, `can_rx` и `comms` нет |
 | §3 модель времени | esp_timer + `vTaskDelayUntil` | реализовано; измерено 2000.0 мкс среднего периода при джиттере ±0.8 мс |
 | §4 IMU | ICM-20948 по SPI + DRDY | mock: покой, 500 Гц, контракт (радианы / рад/с / g) выведен из upstream |
-| §5 логический мотор | агрегация двух VESC + supervisor | **заблокирован**: команды считаются и отбрасываются |
+| §4 IMU (железо) | ICM-20948 по SPI + DRDY | **реализован по I2C**: 0x68, ±4 g / ±500 °/с, 562.5 Гц, 0 ошибок за 31 тыс. чтений. DRDY не подключён, данные в контур не идут |
+| §5 логический мотор | агрегация двух VESC + supervisor | **Supervisor реализован**; все 12 выходов SDK сведены в Motor Gate; backend отсутствует как код |
 | §6 CAN | TWAI 1 Мбит/с | **отсутствует**: ни одного символа TWAI в прошивке |
-| §7 хранение | NVS, namespace `refloat` | реализовано: namespace `floatcore`, 128 слов одним blob |
+| §7 хранение | NVS, namespace `refloat` | реализовано: namespace `floatcore`, 128 слов одним blob, запись только в `DISARMED` и только из задачи на ядре 0 |
 | §8 транспорт UI | BLE/UART + протокол VESC | не переносился; радио выключено |
 
 Отличие от проекта, которое стоит отметить: приоритет `Refloat Aux` получается
 не назначением, а вызовом самого Refloat — `thread_set_priority(-1)`
 (`main.c:1113`), который наш backend отображает в шкалу FreeRTOS.
+
+### DEFERRED UNTIL FINAL MECHANICAL INSTALLATION
+
+Корпус электроники не собран, поэтому отложено и **намеренно не сделано**:
+
+* привязка осей датчика к осям доски (swap, знаки, матрица поворота);
+* определение ориентации модуля относительно доски;
+* передача реальных accel/gyro в Refloat через `VESC_IF->imu_*`;
+* проверка pitch/roll ручным наклоном;
+* включение отказов реального IMU в активную защиту контура;
+* любая калибровка и настройка Mahony.
+
+Подробности — `icm20948_driver.md` §7 и `esp32_safety.md`, раздел
+«Requirements before enabling motor output».
 
 ---
 

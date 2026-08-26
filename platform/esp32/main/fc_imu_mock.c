@@ -28,6 +28,8 @@
 
 #include "fc_platform.h"
 
+#include "../../../compat/safety/fc_supervisor.h"
+
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -131,14 +133,20 @@ static void imu_task(void *arg) {
             continue;
         }
 
+        // Отметка живости контура для супервизора: он обязан узнать о
+        // зависании раньше, чем сработает watchdog.
+        fc_supervisor_report_loop_tick((uint64_t) now_us);
+
         void (*cb)(float *, float *, float *, float) = g_imu.callback;
         if (cb) {
+            fc_timing_exec_begin(FC_TIMING_CONTROL);
             // Массивы копируются: Refloat получает буферы, которые не меняются
             // под ним во время обработки семпла.
             float acc[3], gyro[3];
             memcpy(acc, g_imu.accel, sizeof(acc));
             memcpy(gyro, g_imu.gyro, sizeof(gyro));
             cb(acc, gyro, NULL, dt);
+            fc_timing_exec_end(FC_TIMING_CONTROL);
         }
         esp_task_wdt_reset();
     }

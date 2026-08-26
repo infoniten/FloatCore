@@ -12,15 +12,28 @@ VESC Tool / приложение  ──BLE/Wi-Fi──►  ESP32
                                          └─ Motor abstraction ──CAN──► VESC A + VESC B
 ```
 
-## Статус: Этап 0.5 — первый запуск на физической ESP32
+## Статус: Этап 0.6A — Safety Supervisor, драйвер IMU, разбор джиттера
 
-Реальный вывод на моторы не активирован. **Неизменённый Refloat 1.3.0 запущен на
-живой плате ESP32-D0WD-V3**: контур управления идёт 500 Гц, команды мотору
-блокируются, CAN отсутствует. Подробности — в
-[docs/esp32_board_bringup.md](docs/esp32_board_bringup.md) и
-[docs/esp32_safety.md](docs/esp32_safety.md).
+Реальный вывод на моторы не активирован. **Неизменённый Refloat 1.3.0 работает
+на живой плате ESP32-D0WD-V3**, физический ICM-20948 читается, все выходы на
+мотор сведены в единую точку под управлением Safety Supervisor, а джиттер
+контура разобран и уменьшен вчетверо.
 
 Готово:
+
+* **Safety Supervisor** — независимая машина состояний, владеющая разрешением
+  на выход к мотору и на запись конфигурации ([docs/safety_supervisor.md](docs/safety_supervisor.md));
+* **Motor Gate** — все 12 выходов SDK VESC сведены в одну функцию,
+  `physically_sent == 0` во всех тестах;
+* **драйвер ICM-20948** с обоснованием каждого регистра по datasheet
+  ([docs/icm20948_driver.md](docs/icm20948_driver.md)); данные в Refloat пока
+  не идут — ориентация датчика не зафиксирована;
+* **источник джиттера найден и устранён**: активное ожидание в `sleep_us`,
+  опоздания контура 4.4 % → 1.0 % ([docs/realtime_timing.md](docs/realtime_timing.md));
+* **политика записи**: только в `DISARMED` и только вне realtime — остановка
+  контура на 14 мс исчезла ([docs/config_persistence_policy.md](docs/config_persistence_policy.md));
+* **compile-time профиль `FLOATCORE_LAB_SAFE`**: опасные пути не выключены, а
+  отсутствуют как код;
 
 * **прошивка ESP32 на официальном ESP-IDF v5.5.5**: те же исходники Refloat и те же
   общие слои, что и в host-сборке; отличается только реализация платформы;
@@ -77,7 +90,12 @@ Refloat не защищает себя сам — это обязанность 
 | [docs/porting_strategy.md](docs/porting_strategy.md) | Аргументированный выбор Strategy A/B/C |
 | [docs/esp32_architecture.md](docs/esp32_architecture.md) | Устройство прошивки: задачи, тайминг, motor abstraction, supervisor, план тестирования; §0 — что уже реализовано |
 | [docs/esp32_board_bringup.md](docs/esp32_board_bringup.md) | **Результаты запуска на живой плате:** железо, toolchain, тайминг контура, память, watchdog, persistence, циклы загрузки |
-| [docs/esp32_safety.md](docs/esp32_safety.md) | Почему прошивка v0.5 физически не может сформировать команду мотору или кадр CAN |
+| [docs/esp32_safety.md](docs/esp32_safety.md) | Почему прошивка физически не может сформировать команду мотору или кадр CAN; инвентарь диагностических команд; список блокеров до включения мотора |
+| [docs/safety_supervisor.md](docs/safety_supervisor.md) | Машина состояний супервизора, Motor Gate, счётчики, инъекция отказов |
+| [docs/realtime_timing.md](docs/realtime_timing.md) | Матрица прогонов, перцентили, разбор джиттера по гипотезам |
+| [docs/icm20948_driver.md](docs/icm20948_driver.md) | Драйвер IMU: обоснование настроек по datasheet, диагностика, восстановление шины |
+| [docs/imu_contract.md](docs/imu_contract.md) | Контракт `VESC_IF` в части IMU, выведенный по исходникам upstream |
+| [docs/config_persistence_policy.md](docs/config_persistence_policy.md) | Когда разрешена запись во flash и почему |
 | [docs/qml_parse_error_606.md](docs/qml_parse_error_606.md) | Разбор ошибки `Expected token numeric literal` в QML Scripting VESC Tool 6.06 |
 | [docs/risk_register.md](docs/risk_register.md) | 20 рисков с оценкой и мерами |
 | [docs/vesc_if_contract.md](docs/vesc_if_contract.md) | **Контракт платформенного слоя:** все 74 функции по 8 категориям — сигнатура, места вызова, частота, участие в контуре, синхронизация, источник данных, требование по задержке, поведение при отказе |

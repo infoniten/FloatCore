@@ -19,9 +19,11 @@
 #define FC_CORE_REALTIME 1
 #define FC_CORE_HOUSEKEEPING 0
 
-#define FC_PRIO_IMU 14       // источник ритма контура: imu_ref_callback
-#define FC_PRIO_REFLOAT 12   // refloat_thd, 500 Гц
-#define FC_PRIO_CONSOLE 4    // read-only CLI, ядро 0
+#define FC_PRIO_IMU 14        // источник ритма контура: imu_ref_callback
+#define FC_PRIO_IMU_HW 13     // чтение физического ICM-20948
+#define FC_PRIO_REFLOAT 12    // refloat_thd, 500 Гц
+#define FC_PRIO_SUPERVISOR 15 // выше контура: обязан отработать при перегрузке
+#define FC_PRIO_CONSOLE 4     // read-only CLI, ядро 0
 
 // Refloat просит 1536 байт стека — этого мало для Xtensa (docs/vesc_if_contract.md §2).
 #define FC_STACK_SCALE 8
@@ -31,8 +33,15 @@ typedef enum {
     FC_TIMING_CONTROL = 0,  // imu_ref_callback: собственно контур управления
     FC_TIMING_MAIN,         // refloat_thd
     FC_TIMING_AUX,          // aux_thd
+    FC_TIMING_IMU_READ,     // задача чтения физического ICM-20948
     FC_TIMING_COUNT
 } FcTimingChannel;
+
+// Гистограмма периодов. Ширина корзины — nominal/50, диапазон 0…4×nominal,
+// плюс корзина переполнения. Такой шаг (40 мкс при номинале 2000) позволяет
+// считать p99 с точностью, сравнимой с самим джиттером, и при этом стоит
+// 4 канала × 201 × 4 Б ≈ 3.2 КБ ОЗУ.
+#define FC_TIMING_BINS 200
 
 typedef struct {
     const char *name;
@@ -41,8 +50,25 @@ typedef struct {
     uint64_t sum_period_us;
     uint32_t min_period_us;
     uint32_t max_period_us;
-    uint32_t late;  // период > nominal * (1 + FC_TIMING_LATE_TOLERANCE)
+    uint32_t late;    // период больше номинала более чем на 20 %
+    uint32_t missed;  // период больше двух номиналов: итерация пропущена
     uint64_t window_start_us;
+
+    // Перцентили периода, мкс. Считаются по гистограмме, поэтому дают
+    // верхнюю границу корзины, а не точное значение.
+    uint32_t p50_us;
+    uint32_t p95_us;
+    uint32_t p99_us;
+    uint32_t p999_us;
+    uint32_t overflow;  // сколько периодов вышло за диапазон гистограммы
+
+    // Длительность самой итерации, отдельно от периода: это и есть ответ на
+    // вопрос «джиттер планировщика или время исполнения».
+    uint64_t exec_samples;
+    uint64_t exec_sum_us;
+    uint32_t exec_min_us;
+    uint32_t exec_max_us;
+    uint32_t exec_p99_us;
 } FcTimingStats;
 
 void fc_timing_reset(void);
@@ -50,6 +76,14 @@ void fc_timing_reset(void);
 void fc_timing_tick(FcTimingChannel ch);
 void fc_timing_set_nominal(FcTimingChannel ch, uint32_t period_us);
 FcTimingStats fc_timing_get(FcTimingChannel ch);
+
+/** Границы итерации: между ними меряется время исполнения, а не период. */
+void fc_timing_exec_begin(FcTimingChannel ch);
+void fc_timing_exec_end(FcTimingChannel ch);
+
+/** Выгрузить гистограмму периодов: bins[i] соответствует [i*w, (i+1)*w). */
+uint32_t fc_timing_histogram(FcTimingChannel ch, uint32_t *bins, uint32_t max_bins,
+                             uint32_t *bin_width_us);
 
 // ------------------------------------------------------------- mock IMU (§8)
 /**
@@ -71,31 +105,35 @@ float fc_adc_read(int vesc_pin);
 float fc_adc_safe_voltage(void);
 
 // ------------------------------------------------------------ хранилище (§12)
+typedef struct {
+    uint64_t writes_accepted;
+    uint64_t writes_rejected;   // политика супервизора не разрешила
+    uint64_t commits_requested;
+    uint64_t commits_done;
+    uint64_t commits_failed;
+    uint32_t last_commit_us;    // длительность последней операции с flash
+    uint32_t max_commit_us;     // худшая наблюдённая длительность
+    uint64_t last_commit_at_us;
+    bool dirty;
+} FcStorageStats;
+
 bool fc_storage_init(void);
 bool fc_storage_read(uint32_t *value, int address);
 bool fc_storage_write(uint32_t value, int address);
+/** Синхронный коммит. Разрешён только вне realtime-пути (загрузка, CLI). */
 bool fc_storage_commit(void);
+/** Асинхронная просьба закоммитить: выполнит задача хранилища (ТЗ §25). */
+bool fc_storage_request_commit(void);
+/** Учесть запись, отклонённую политикой супервизора. */
+void fc_storage_note_rejected_write(void);
+FcStorageStats fc_storage_stats(void);
+uint32_t fc_storage_stack_watermark(void);
 /** Число слов, доступных Refloat (эмуляция eeprom_var). */
 int fc_storage_capacity(void);
 
-// ------------------------------------------------------------- мотор (§6)
-typedef enum {
-    FC_MOTOR_CMD_CURRENT = 0,
-    FC_MOTOR_CMD_BRAKE,
-    FC_MOTOR_CMD_DUTY,
-    FC_MOTOR_CMD_RPM,
-    FC_MOTOR_CMD_COUNT
-} FcMotorCmdKind;
-
-typedef struct {
-    uint64_t blocked[FC_MOTOR_CMD_COUNT];
-    float last_value[FC_MOTOR_CMD_COUNT];
-    uint64_t keepalive_calls;
-    uint64_t total_blocked;
-} FcMotorStats;
-
-FcMotorStats fc_motor_stats(void);
-const char *fc_motor_backend_name(void);
+// ------------------------------------------------------------- мотор (§11)
+// Счётчики и политика живут в compat/safety/fc_motor_gate.h — здесь остаётся
+// только описание отсутствующей шины.
 const char *fc_can_backend_name(void);
 
 // ------------------------------------------------------------------ VESC_IF
@@ -107,6 +145,17 @@ void floatcore_set_arg_slot(void **slot);
 
 // ------------------------------------------------------------------- прочее
 void fc_console_start(void);
+void fc_supervisor_task_start(void);
+uint32_t fc_supervisor_stack_watermark(void);
+void fc_print_safety_line(void);
+
+// ------------------------------------------------- физический IMU (v0.6A)
+bool fc_imu_real_start(void);
+void fc_imu_real_stop(void);
+bool fc_imu_real_available(void);
+uint64_t fc_imu_real_iterations(void);
+uint32_t fc_imu_real_max_read_us(void);
+uint32_t fc_imu_real_stack_watermark(void);
 uint64_t fc_uptime_us(void);
 
 // ------------------------------------------- интроспекция для консоли (§15)
@@ -119,4 +168,8 @@ void fc_imu_inject_stall(int ms);
 bool fc_config_registered(void);
 uint32_t fc_boot_count(void);
 const char *fc_reset_reason_name(void);
+
+// ------------------------------------------- идентификация железа (v0.6 §2)
+/** I2C на GPIO21/22: скан, WHO_AM_I и сырые семплы. Только диагностика. */
+void fc_imu_probe(int stream_seconds);
 int fc_config_read(uint8_t *data, bool is_default);

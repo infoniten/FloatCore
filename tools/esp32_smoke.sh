@@ -68,19 +68,53 @@ else
 fi
 
 echo ""
-echo "4. безопасность по таблице символов"
+echo "4. безопасность по таблице символов (ТЗ v0.6A §15)"
 ELF="$ESPDIR/build/floatcore_esp32.elf"
 NM="$(ls "$HOME"/.espressif/tools/xtensa-esp-elf/*/xtensa-esp-elf/bin/xtensa-esp32-elf-nm 2>/dev/null | head -1)"
 if [ -n "$NM" ] && [ -f "$ELF" ]; then
-    TWAI=$("$NM" "$ELF" | grep -ci 'twai' || true)
-    if [ "$TWAI" -eq 0 ]; then
-        pass "в прошивке нет ни одного символа TWAI/CAN — физического пути к мотору нет"
+    SYMS="$("$NM" "$ELF")"
+
+    # Ни одного символа передатчика CAN. Проверяется подстрокой, а не точным
+    # именем: любой драйвер TWAI неизбежно принесёт с собой символы twai_*.
+    check_absent() {
+        local pattern="$1" what="$2"
+        local n
+        n=$(echo "$SYMS" | grep -ci "$pattern" || true)
+        if [ "$n" -eq 0 ]; then
+            pass "$what: символов нет"
+        else
+            fail "$what: найдено $n символов — stop condition"
+            echo "$SYMS" | grep -i "$pattern" | sed 's/^/            /'
+        fi
+    }
+    check_absent 'twai'                    "CAN/TWAI TX"
+    check_absent 'fc_motor_gate_set_backend' "регистрация backend-а мотора"
+    check_absent 'manual_set_current'      "ручная подача тока"
+    check_absent 'manual_set_duty'         "ручная подача duty"
+    check_absent 'motor_can_send'          "отправка команды мотору по CAN"
+    check_absent 'real_motor_backend'      "реальный backend мотора"
+    check_absent 'safety_bypass'           "обход политики безопасности"
+
+    # А это, наоборот, обязано присутствовать.
+    check_present() {
+        local pattern="$1" what="$2"
+        if echo "$SYMS" | grep -q "$pattern"; then
+            pass "$what: на месте"
+        else
+            fail "$what: отсутствует — собран не тот код"
+        fi
+    }
+    check_present ' [tT] refloat_init'          "настоящий Refloat"
+    check_present ' [tT] fc_motor_gate_request' "единая точка выхода на мотор"
+    check_present ' [tT] fc_supervisor_poll'    "Safety Supervisor"
+    check_present ' [tT] icm20948_read'         "драйвер ICM-20948"
+
+    # Профиль сборки должен быть виден в самом двоичном файле.
+    if strings "$ELF" | grep -q "LAB_SAFE"; then
+        pass "профиль LAB_SAFE зашит в прошивку"
     else
-        fail "найдены символы TWAI ($TWAI) — это stop condition ТЗ v0.5 §19"
+        fail "в прошивке нет строки профиля LAB_SAFE"
     fi
-    REFLOAT=$("$NM" "$ELF" | grep -c ' [tT] refloat_init' || true)
-    [ "$REFLOAT" -ge 1 ] && pass "настоящий Refloat слинкован (refloat_init)" \
-                         || fail "refloat_init отсутствует — собран не тот код"
 else
     info "nm недоступен, проверка символов пропущена"
 fi
@@ -104,7 +138,7 @@ if ! "$PY_SERIAL" -c "import serial" 2>/dev/null; then
     done
 fi
 "$PY_SERIAL" "$ROOT/tools/esp32_serial.py" --port "$PORT" --seconds "$SECONDS_CAPTURE" \
-    --send safety --out "$BOOTLOG" >/dev/null 2>&1 || true
+    --send safety --send supervisor --send imu --out "$BOOTLOG" >/dev/null 2>&1 || true
 
 if [ ! -s "$BOOTLOG" ]; then
     fail "boot-лог пуст"
@@ -123,8 +157,17 @@ check_marker "ESP-IDF:"                 "версия ESP-IDF в логе"
 check_marker "Initializing Refloat"     "настоящий Refloat начал инициализацию"
 check_marker "config registered"        "конфигурация Refloat зарегистрирована"
 check_marker "DISENGAGED"               "footpad остаётся disengaged"
-check_marker "motor:       blocked"     "backend мотора заблокирован"
-check_marker "blocked command"          "блокировка команд мотору видна в трассе"
+check_marker "profile:     LAB_SAFE"    "прошивка собрана в лабораторном профиле"
+check_marker "backend none (blocked)"   "backend мотора отсутствует"
+check_marker "supervisor: DISARMED"     "supervisor поднялся в DISARMED"
+check_marker "ICM-20948"                "физический IMU обнаружен"
+
+# Счётчик физически отправленных команд обязан быть нулевым.
+if grep -qE "sent=0" "$BOOTLOG"; then
+    pass "physically_sent == 0 в отчёте безопасности"
+else
+    fail "в отчёте безопасности нет подтверждения sent=0"
+fi
 
 if grep -qE "Guru Meditation|rst:0x.*PANIC|StoreProhibited" "$BOOTLOG"; then
     fail "в логе есть panic"

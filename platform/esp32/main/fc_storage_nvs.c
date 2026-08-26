@@ -41,8 +41,10 @@ static struct {
     nvs_handle_t handle;
     bool ready;
     volatile bool dirty;
+    volatile bool commit_requested;
     volatile uint64_t last_write_us;
-    uint64_t commits;
+    FcStorageStats stats;
+    TaskHandle_t task;
 } g_st;
 
 static void flush_task(void *arg);
@@ -87,7 +89,7 @@ bool fc_storage_init(void) {
     }
 
     g_st.ready = true;
-    xTaskCreatePinnedToCore(flush_task, "fc_nvs", 3072, NULL, 3, NULL, FC_CORE_HOUSEKEEPING);
+    xTaskCreatePinnedToCore(flush_task, "fc_nvs", 3072, NULL, 3, &g_st.task, FC_CORE_HOUSEKEEPING);
     return true;
 }
 
@@ -106,7 +108,9 @@ bool fc_storage_write(uint32_t value, int address) {
     if (g_st.words[address] != value) {
         g_st.words[address] = value;
         g_st.dirty = true;
+        g_st.stats.dirty = true;
     }
+    ++g_st.stats.writes_accepted;
     g_st.last_write_us = fc_uptime_us();
     return true;
 }
@@ -118,26 +122,64 @@ bool fc_storage_commit(void) {
     if (!g_st.dirty) {
         return true;
     }
+    // Длительность операции меряется всегда: именно она и есть та самая
+    // остановка контура, ради которой введена политика записи (ТЗ §23).
+    uint64_t t0 = fc_uptime_us();
     esp_err_t err = nvs_set_blob(g_st.handle, FC_STORAGE_KEY, g_st.words, sizeof(g_st.words));
     if (err == ESP_OK) {
         err = nvs_commit(g_st.handle);
     }
+    uint32_t dur = (uint32_t) (fc_uptime_us() - t0);
+    g_st.stats.last_commit_us = dur;
+    g_st.stats.last_commit_at_us = fc_uptime_us();
+    if (dur > g_st.stats.max_commit_us) {
+        g_st.stats.max_commit_us = dur;
+    }
+
     if (err != ESP_OK) {
+        ++g_st.stats.commits_failed;
         ESP_LOGE(TAG, "коммит не удался: %s", esp_err_to_name(err));
         return false;
     }
     g_st.dirty = false;
-    ++g_st.commits;
-    ESP_LOGI(TAG, "NVS: сохранено %u слов (коммит #%llu)", FC_STORAGE_WORDS,
-             (unsigned long long) g_st.commits);
+    g_st.stats.dirty = false;
+    ++g_st.stats.commits_done;
+    ESP_LOGI(TAG, "NVS: сохранено %u слов за %u мкс (коммит #%llu)", FC_STORAGE_WORDS,
+             (unsigned) dur, (unsigned long long) g_st.stats.commits_done);
     return true;
 }
 
+bool fc_storage_request_commit(void) {
+    if (!g_st.ready) {
+        return false;
+    }
+    ++g_st.stats.commits_requested;
+    g_st.commit_requested = true;
+    return true;
+}
+
+void fc_storage_note_rejected_write(void) {
+    ++g_st.stats.writes_rejected;
+}
+
+FcStorageStats fc_storage_stats(void) {
+    return g_st.stats;
+}
+
+uint32_t fc_storage_stack_watermark(void) {
+    return g_st.task ? (uint32_t) uxTaskGetStackHighWaterMark(g_st.task) : 0;
+}
+
+// Единственное место в прошивке, где происходит запись во flash после
+// загрузки. Задача низкого приоритета на ядре 0: контур на ядре 1 её не
+// ждёт, а сама она никогда не вызывается из realtime-пути (ТЗ §25).
 static void flush_task(void *arg) {
     (void) arg;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(FC_STORAGE_FLUSH_MS / 3));
-        if (g_st.dirty && fc_uptime_us() - g_st.last_write_us >= FC_STORAGE_FLUSH_MS * 1000ULL) {
+        bool due = g_st.dirty && fc_uptime_us() - g_st.last_write_us >= FC_STORAGE_FLUSH_MS * 1000ULL;
+        if (g_st.commit_requested || due) {
+            g_st.commit_requested = false;
             fc_storage_commit();
         }
     }

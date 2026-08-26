@@ -3,8 +3,10 @@
 // Проверяется то, что можно проверить без платы и что стоит слишком дорого,
 // чтобы ловить это на железе:
 //   * безопасное состояние footpad;
-//   * блокировка команд мотору и rate-limit её логов;
-//   * арифметика периодов контура.
+//   * арифметика периодов, перцентилей и времени исполнения.
+//
+// Блокировка команд мотору проверяется не здесь, а в tests/safety: с v0.6A
+// единственная точка выхода — Motor Gate, и он платформенно-нейтрален.
 //
 // Модули platform/esp32/main собираются здесь как есть, поверх заглушек
 // esp_timer/esp_log из tests/esp32/stubs. Это тот же приём, что и с
@@ -14,7 +16,6 @@
 #include "stubs/esp_timer.h"
 
 #include "../../platform/esp32/main/fc_platform.h"
-#include "../../compat/motor/logical_motor.h"
 
 #include <math.h>
 #include <stdbool.h>
@@ -81,63 +82,8 @@ static void test_adc_safe(void) {
     check(safe_everywhere, "для любого порога 0.01…3.30 В состояние остаётся disengaged");
 }
 
-static void test_motor_blocked(void) {
-    printf("\n  \033[1m2. команды мотору блокируются\033[0m\n");
-
-    LogicalMotorConfig cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    esp32_test_set_time_us(0);
-    logical_motor_init(&cfg);
-    esp32_test_log_reset();
-
-    logical_motor_request_current(12.5f);
-    logical_motor_request_brake_current(3.0f);
-    logical_motor_request_duty(0.4f);
-    logical_motor_keepalive();
-
-    FcMotorStats s = fc_motor_stats();
-    check(s.blocked[FC_MOTOR_CMD_CURRENT] == 1, "set_current заблокирован и посчитан");
-    check(s.blocked[FC_MOTOR_CMD_BRAKE] == 1, "set_brake_current заблокирован и посчитан");
-    check(s.blocked[FC_MOTOR_CMD_DUTY] == 1, "set_duty заблокирован и посчитан");
-    check(s.total_blocked == 3, "суммарный счётчик блокировок совпадает");
-    check(s.keepalive_calls == 1, "timeout_reset учтён отдельно и ничего не отправляет");
-    check(fabsf(s.last_value[FC_MOTOR_CMD_CURRENT] - 12.5f) < 1e-6f,
-          "запрошенное значение сохранено для диагностики, но не применено");
-
-    check(!logical_motor_healthy(), "логический мотор всегда unhealthy: ESC не подключены");
-    LogicalMotorTelemetry t = logical_motor_telemetry();
-    check(!t.esc_a_alive && !t.esc_b_alive, "оба ESC помечены offline");
-    check((t.faults & (LM_FAULT_ESC_A_TIMEOUT | LM_FAULT_ESC_B_TIMEOUT)) ==
-              (LM_FAULT_ESC_A_TIMEOUT | LM_FAULT_ESC_B_TIMEOUT),
-          "выставлены флаги таймаута телеметрии");
-    check(t.motor_current == 0.0f && t.rpm == 0.0f, "телеметрия нулевая, а не выдуманная");
-}
-
-static void test_motor_log_rate_limit(void) {
-    printf("\n  \033[1m3. лог блокировок не забивает serial\033[0m\n");
-
-    LogicalMotorConfig cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    esp32_test_set_time_us(0);
-    logical_motor_init(&cfg);
-    esp32_test_log_reset();
-
-    // Десять секунд контура на 500 Гц: 5000 запросов.
-    for (int i = 0; i < 5000; ++i) {
-        esp32_test_set_time_us((int64_t) i * 2000);
-        logical_motor_request_current(1.0f);
-    }
-
-    int logs = esp32_test_log_count();
-    FcMotorStats s = fc_motor_stats();
-    check(s.blocked[FC_MOTOR_CMD_CURRENT] == 5000, "заблокированы все 5000 запросов");
-    check(logs <= 12, "записей в лог не больше 12 за 10 с (rate-limit 1/с)");
-    check(logs >= 9, "но и не меньше 9 — факт блокировки в логе виден");
-    printf("      \033[90m·\033[0m 5000 запросов -> %d записей в лог\n", logs);
-}
-
 static void test_timing(void) {
-    printf("\n  \033[1m4. арифметика периодов контура\033[0m\n");
+    printf("\n  \033[1m2. арифметика периодов контура\033[0m\n");
 
     esp32_test_set_time_us(0);
     fc_timing_reset();
@@ -175,8 +121,78 @@ static void test_timing(void) {
     check(fc_timing_get(FC_TIMING_MAIN).late == 1, "2401 мкс уже считается");
 }
 
+static void test_timing_distribution(void) {
+    printf("\n  \033[1m4. перцентили, пропуски и время исполнения\033[0m\n");
+
+    esp32_test_set_time_us(0);
+    fc_timing_reset();
+    fc_timing_set_nominal(FC_TIMING_CONTROL, 2000);
+
+    // 990 периодов ровно по 2000 мкс и 10 по 4000: p99 обязан показать
+    // хвост, а среднее — почти не заметить его.
+    int64_t now = 0;
+    esp32_test_set_time_us(now);
+    fc_timing_tick(FC_TIMING_CONTROL);
+    for (int i = 0; i < 1000; ++i) {
+        now += (i % 100 == 99) ? 4000 : 2000;
+        esp32_test_set_time_us(now);
+        fc_timing_tick(FC_TIMING_CONTROL);
+    }
+    FcTimingStats t = fc_timing_get(FC_TIMING_CONTROL);
+    check(t.iterations == 1000, "учтена тысяча интервалов");
+    check(t.p50_us <= 2040, "медиана осталась у номинала");
+    // Хвост занимает ровно 1 %, поэтому его видит p99.9, а не p99: при
+    // накоплении 990 из 1000 порог 99 % достигается ещё в корзине номинала.
+    // Это не придирка к формулировке — именно так и надо читать перцентили.
+    check(t.p99_us <= 2040, "p99 при хвосте ровно в 1 % остаётся у номинала");
+    check(t.p999_us >= 4000, "p99.9 показывает хвост, который среднее не видит");
+    check(t.missed == 10, "период вдвое больше номинала считается пропуском");
+    check(t.late == 10, "он же считается опозданием");
+    printf("      \033[90m·\033[0m mean %.1f, p50 %u, p95 %u, p99 %u, max %u\n",
+           (double) t.sum_period_us / (double) t.iterations, (unsigned) t.p50_us,
+           (unsigned) t.p95_us, (unsigned) t.p99_us, (unsigned) t.max_period_us);
+
+    // Время исполнения меряется отдельно от периода: это и есть ответ на
+    // вопрос «планировщик опаздывает или итерация долго считает».
+    fc_timing_reset();
+    fc_timing_set_nominal(FC_TIMING_MAIN, 2000);
+    now = 0;
+    for (int i = 0; i < 100; ++i) {
+        esp32_test_set_time_us(now);
+        fc_timing_exec_begin(FC_TIMING_MAIN);
+        esp32_test_set_time_us(now + 150);
+        fc_timing_exec_end(FC_TIMING_MAIN);
+        now += 2000;
+    }
+    t = fc_timing_get(FC_TIMING_MAIN);
+    check(t.exec_samples == 100, "сто измерений исполнения");
+    check(t.exec_sum_us / t.exec_samples == 150, "среднее время исполнения 150 мкс");
+    check(t.exec_min_us == 150 && t.exec_max_us == 150, "min и max совпадают на ровном профиле");
+    check(t.iterations == 0, "измерение исполнения не подменяет собой период");
+
+    // Гистограмма выгружается и сумма её корзин равна числу интервалов.
+    fc_timing_reset();
+    fc_timing_set_nominal(FC_TIMING_CONTROL, 2000);
+    now = 0;
+    for (int i = 0; i < 51; ++i) {
+        esp32_test_set_time_us(now);
+        fc_timing_tick(FC_TIMING_CONTROL);
+        now += 2000;
+    }
+    static uint32_t bins[FC_TIMING_BINS + 1];
+    uint32_t width = 0;
+    uint32_t n = fc_timing_histogram(FC_TIMING_CONTROL, bins, FC_TIMING_BINS + 1, &width);
+    uint64_t sum = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        sum += bins[i];
+    }
+    check(n == FC_TIMING_BINS + 1, "гистограмма отдаёт все корзины плюс переполнение");
+    check(width == 2000 * 4 / FC_TIMING_BINS, "ширина корзины — четыре номинала на все корзины");
+    check(sum == 50, "сумма корзин равна числу интервалов");
+}
+
 static void test_uptime(void) {
-    printf("\n  \033[1m5. монотонное время платформы\033[0m\n");
+    printf("\n  \033[1m3. монотонное время платформы\033[0m\n");
     esp32_test_set_time_us(1234567);
     check(fc_uptime_us() == 1234567, "fc_uptime_us берёт время у esp_timer без пересчёта");
 }
@@ -184,9 +200,8 @@ static void test_uptime(void) {
 int main(void) {
     printf("\n\033[1mТесты платформенного слоя ESP32 (без платы)\033[0m\n");
     test_adc_safe();
-    test_motor_blocked();
-    test_motor_log_rate_limit();
     test_timing();
+    test_timing_distribution();
     test_uptime();
 
     printf("\n================================================================\n");

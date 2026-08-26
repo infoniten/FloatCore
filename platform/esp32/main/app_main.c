@@ -13,6 +13,11 @@
 
 #include "fc_platform.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
+#include "../../../compat/safety/fc_build_profile.h"
+#include "../../../compat/safety/fc_imu_health.h"
+#include "../../../compat/safety/fc_motor_gate.h"
+#include "../../../compat/safety/fc_supervisor.h"
+#include "../drivers/icm20948.h"
 
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -138,9 +143,12 @@ static void print_banner(uint32_t boot_count) {
            app->version);
     printf("reset:       %s\n", reset_reason_name(g_reset_reason));
     printf("boot #:      %" PRIu32 " (счётчик в NVS — доказательство persistence)\n", boot_count);
-    printf("motor:       %s\n", fc_motor_backend_name());
+    printf("profile:     %s\n", FC_PROFILE_NAME);
+    printf("motor:       backend %s, выход запрещён политикой супервизора\n",
+           fc_motor_gate_backend_name());
     printf("can:         %s\n", fc_can_backend_name());
-    printf("imu:         mock (%d Hz, покой)\n", fc_imu_rate_hz());
+    printf("imu(loop):   mock (%d Hz, покой) — контур Refloat работает от него\n",
+           fc_imu_rate_hz());
     printf("adc:         mock (%.2f V, footpad disengaged)\n", (double) fc_adc_safe_voltage());
     printf("================================================\n\n");
 }
@@ -176,11 +184,17 @@ static void report_task(void *arg) {
             if (!t.iterations) {
                 continue;
             }
-            printf("timing %-26s iters %-8llu mean %8.1f us  min %6" PRIu32 "  max %6" PRIu32
-                   "  late %" PRIu32 "\n",
+            printf("timing %-26s n=%-7llu mean %7.1f  p50 %6" PRIu32 "  p95 %6" PRIu32
+                   "  p99 %6" PRIu32 "  p99.9 %6" PRIu32 "  min %6" PRIu32 "  max %6" PRIu32
+                   "  late %" PRIu32 " missed %" PRIu32 "\n",
                    t.name, (unsigned long long) t.iterations,
-                   (double) t.sum_period_us / (double) t.iterations, t.min_period_us,
-                   t.max_period_us, t.late);
+                   (double) t.sum_period_us / (double) t.iterations, t.p50_us, t.p95_us,
+                   t.p99_us, t.p999_us, t.min_period_us, t.max_period_us, t.late, t.missed);
+            if (t.exec_samples) {
+                printf("       %-26s exec mean %6.1f  p99 %6" PRIu32 "  max %6" PRIu32 " us\n",
+                       "", (double) t.exec_sum_us / (double) t.exec_samples, t.exec_p99_us,
+                       t.exec_max_us);
+            }
         }
 
         printf("heap             free %" PRIu32 " B, min %" PRIu32 " B\n", esp_get_free_heap_size(),
@@ -189,18 +203,18 @@ static void report_task(void *arg) {
         // свободного стека за всё время жизни задачи.
         printf("stack %-14s свободно минимум %" PRIu32 " B из 4096\n", "fc_imu",
                fc_imu_stack_watermark());
+        printf("stack %-14s свободно минимум %" PRIu32 " B из 4096\n", "fc_imu_hw",
+               fc_imu_real_stack_watermark());
+        printf("stack %-14s свободно минимум %" PRIu32 " B из 4096\n", "fc_super",
+               fc_supervisor_stack_watermark());
+        printf("stack %-14s свободно минимум %" PRIu32 " B из 3072\n", "fc_nvs",
+               fc_storage_stack_watermark());
         for (size_t i = 0; i < fc_thread_count(); ++i) {
             printf("stack %-14s свободно минимум %" PRIu32 " B из 12288\n", fc_thread_name(i),
                    fc_thread_stack_watermark(i));
         }
 
-        FcMotorStats m = fc_motor_stats();
-        printf("motor blocked    всего %llu (current %llu, brake %llu, duty %llu), keepalive %llu\n",
-               (unsigned long long) m.total_blocked,
-               (unsigned long long) m.blocked[FC_MOTOR_CMD_CURRENT],
-               (unsigned long long) m.blocked[FC_MOTOR_CMD_BRAKE],
-               (unsigned long long) m.blocked[FC_MOTOR_CMD_DUTY],
-               (unsigned long long) m.keepalive_calls);
+        fc_print_safety_line();
         printf("-------------------------------------\n\n");
         fflush(stdout);
     }
@@ -208,6 +222,12 @@ static void report_task(void *arg) {
 
 void app_main(void) {
     g_reset_reason = esp_reset_reason();
+    uint64_t t = (uint64_t) esp_timer_get_time();
+
+    // 0. Супервизор поднимается раньше всего: он должен видеть загрузку с
+    //    самого начала, а не с момента, когда всё уже работает.
+    fc_supervisor_init(t);
+    fc_motor_gate_init();
 
     // 1. Хранилище — до всего остального: Refloat читает конфигурацию в init().
     bool storage_ok = fc_storage_init();
@@ -229,6 +249,8 @@ void app_main(void) {
         return;
     }
 
+    fc_supervisor_begin_self_test(t = (uint64_t) esp_timer_get_time());
+
     // 2. Платформенный backend VESC_IF.
     fc_timing_reset();
     fc_vesc_if_init();
@@ -237,21 +259,40 @@ void app_main(void) {
     fc_timing_set_nominal(FC_TIMING_MAIN, 2000);
     fc_timing_set_nominal(FC_TIMING_AUX, 1000000 / 30);  // LEDS_REFRESH_RATE = 30
 
-    // 3. Mock-IMU: задаёт ритм контура через imu_ref_callback.
+    // 3. Физический ICM-20948. На этом этапе он НЕ подключён к Refloat
+    //    (ТЗ v0.6A §29): читается, диагностируется, в контур не идёт.
+    bool imu_hw = fc_imu_real_start();
+    printf("[floatcore] физический IMU: %s\n",
+           imu_hw ? "ICM-20948 инициализирован, читается отдельной задачей"
+                  : "НЕ обнаружен — контур это не затрагивает, он работает от mock");
+
+    // 4. Mock-IMU: задаёт ритм контура через imu_ref_callback.
     fc_imu_mock_start();
 
-    // 4. Настоящий Refloat. Тот же init(), что и на VESC: refloat_facade_start()
+    // 5. Настоящий Refloat. Тот же init(), что и на VESC: refloat_facade_start()
     //    подставляет lib_info.arg и вызывает refloat_init().
     printf("[floatcore] Refloat initialization started\n");
     bool ok = refloat_facade_start();
     if (!ok) {
         ESP_LOGE(TAG, "refloat_init() вернул false — Refloat НЕ запущен");
+        fc_supervisor_self_test_result(false, (uint64_t) esp_timer_get_time());
         return;
     }
     printf("[floatcore] Refloat initialized: %s\n",
            fc_config_registered() ? "config registered" : "config NOT registered");
 
-    // 5. Проверка безопасного состояния footpad сразу после старта (ТЗ §9).
+    // 6. Самопроверка завершена: хранилище поднялось, Refloat стартовал,
+    //    конфигурация зарегистрирована. Физический IMU в критерий не входит:
+    //    на v0.6A он не участвует в контуре, и его отсутствие не делает
+    //    систему опаснее — она и так не может ничего подать на мотор.
+    t = (uint64_t) esp_timer_get_time();
+    bool self_test_ok = storage_ok && ok && fc_config_registered();
+    fc_supervisor_self_test_result(self_test_ok, t);
+    fc_supervisor_report_platform_ready(true, t);
+    fc_supervisor_report_config_valid(fc_config_registered(), t);
+    fc_supervisor_report_watchdog(true, t);
+
+    // 7. Проверка безопасного состояния footpad сразу после старта (ТЗ §9).
     vTaskDelay(pdMS_TO_TICKS(2500));  // дождаться imu_startup_done и первых итераций
     RefloatSnapshot s = refloat_facade_snapshot();
     printf("[floatcore] footpad: %s, adc %.2f/%.2f V, пороги %.2f/%.2f V -> %s\n",
@@ -262,6 +303,13 @@ void app_main(void) {
         ESP_LOGE(TAG, "mock ADC привёл Refloat в engaged state — это stop condition ТЗ v0.5");
     }
     printf("[floatcore] refloat state: %s\n", refloat_facade_state_name(s.state));
+    fc_supervisor_report_footpad(s.footpad_state != 0, (uint64_t) esp_timer_get_time());
+
+    // 8. Супервизор переходит на собственную задачу и дальше следит сам.
+    fc_supervisor_task_start();
+    printf("[floatcore] supervisor: %s, запись конфигурации %s\n",
+           fc_supervisor_state_name(fc_supervisor_state()),
+           fc_supervisor_config_write_allowed() ? "разрешена" : "запрещена");
 
     // 6. Отчёты и консоль.
     printf("[floatcore] config test value = %.3f (leds.status.brightness_headlights_off)\n",

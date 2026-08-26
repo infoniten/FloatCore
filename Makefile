@@ -56,13 +56,14 @@ REFLOAT_INC := -I$(ROOT)/compat/vesc_api -I$(ROOT)/tests/host/mock -I$(ROOT)/com
                -I$(RSRC) -I$(RSRC)/conf -I$(GEN)
 
 ESP32_TESTS_BIN := $(BIN)/esp32_platform_tests
+SAFETY_TESTS_BIN := $(BIN)/safety_tests
 HOST_TESTS_BIN := $(BIN)/refloat_host_tests
 PROTO_TESTS_BIN := $(BIN)/protocol_tests
 HOST_BIN := $(BIN)/floatcore_host
 
-.PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32
+.PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32 safety-tests
 
-all: $(HOST_TESTS_BIN) $(PROTO_TESTS_BIN) $(HOST_BIN) $(ESP32_TESTS_BIN)
+all: $(HOST_TESTS_BIN) $(PROTO_TESTS_BIN) $(HOST_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN)
 
 # ----------------------------------------------------------------- генерация
 
@@ -177,13 +178,15 @@ $(HOST_BIN): $(FH_OBJ)
 
 # --------------------------------------------------------------------- запуск
 
-test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN)
+test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN)
 	@echo ""
 	$(PROTO_TESTS_BIN)
 	@echo ""
 	$(HOST_TESTS_BIN)
 	@echo ""
 	$(ESP32_TESTS_BIN)
+	@echo ""
+	$(SAFETY_TESTS_BIN)
 
 # Интеграционный прогон поднимает FloatCore Host и говорит с ним по настоящему
 # протоколу VESC — то же, что делает VESC Tool, только без GUI.
@@ -195,6 +198,28 @@ test-all: test integration
 host: $(HOST_BIN)
 	$(HOST_BIN) $(ARGS)
 
+# ----------------------------------------- тесты ядра безопасности (host)
+# compat/safety платформенно-нейтрален, поэтому собирается и проверяется на
+# host в том же профиле LAB_SAFE, что и прошивка.
+
+SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(ROOT)/tests/safety/test_safety.c
+SAFETY_OBJ := $(patsubst %,$(OBJ)/saf_%.o,$(notdir $(basename $(SAFETY_SRC))))
+SAFETY_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_LAB_SAFE=1
+
+$(OBJ)/saf_%.o: $(ROOT)/compat/safety/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/saf_%.o: $(ROOT)/tests/safety/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
+$(SAFETY_TESTS_BIN): $(SAFETY_OBJ)
+	@mkdir -p $(BIN)
+	$(CC) $^ -lm -o $@
+
+safety-tests: $(SAFETY_TESTS_BIN)
+
 # ------------------------------------------------- тесты платформы ESP32 (host)
 # Модули platform/esp32/main собираются поверх заглушек tests/esp32/stubs:
 # проверяется логика (безопасный ADC, блокировка мотора, тайминг), для которой
@@ -202,7 +227,6 @@ host: $(HOST_BIN)
 
 E32_SRC := $(ROOT)/platform/esp32/main/fc_adc_safe.c \
            $(ROOT)/platform/esp32/main/fc_timing.c \
-           $(ROOT)/platform/esp32/main/fc_motor_blocked.c \
            $(ROOT)/tests/esp32/stubs/stubs.c \
            $(ROOT)/tests/esp32/test_esp32_platform.c
 E32_OBJ := $(patsubst %,$(OBJ)/e32_%.o,$(notdir $(basename $(E32_SRC))))
@@ -232,6 +256,6 @@ esp32:
 
 clean:
 	rm -rf $(OBJ) $(BIN)/refloat_host_tests $(BIN)/protocol_tests $(BIN)/floatcore_host \
-	       $(BIN)/esp32_platform_tests
+	       $(BIN)/esp32_platform_tests $(BIN)/safety_tests
 
 -include $(OBJ)/*.d

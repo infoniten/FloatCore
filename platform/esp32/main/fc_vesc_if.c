@@ -11,6 +11,8 @@
 
 #include "fc_platform.h"
 
+#include "../../../compat/safety/fc_motor_gate.h"
+#include "../../../compat/safety/fc_supervisor.h"
 #include "vesc_c_if.h"
 
 #include "esp_heap_caps.h"
@@ -35,6 +37,10 @@ typedef struct {
     volatile bool terminate;
     volatile bool finished;
     char name[16];
+    // Одноразовый аппаратный таймер пробуждения. Нужен, потому что
+    // vTaskDelay квантуется тиком в 1 мс, а Refloat просит нецелое число
+    // тиков (см. комментарий в if_sleep_us).
+    esp_timer_handle_t waker;
 } FcThread;
 
 vesc_c_if *floatcore_vesc_if = NULL;
@@ -76,7 +82,10 @@ static void if_sleep_us(uint32_t us) {
         }
     }
     if (t) {
-        fc_timing_tick(t == &S.threads[0] ? FC_TIMING_MAIN : FC_TIMING_AUX);
+        FcTimingChannel ch = (t == &S.threads[0]) ? FC_TIMING_MAIN : FC_TIMING_AUX;
+        // Итерация потока закончилась ровно здесь: дальше он засыпает.
+        fc_timing_exec_end(ch);
+        fc_timing_tick(ch);
         // Задача жива — гасим watchdog именно здесь: это единственная точка,
         // которую главный цикл проходит на каждой итерации (ТЗ §11).
         esp_task_wdt_reset();
@@ -86,20 +95,34 @@ static void if_sleep_us(uint32_t us) {
         taskYIELD();
         return;
     }
-    // vTaskDelay квантуется тиком 1 мс. Для 2000 мкс это ровно 2 тика.
-    // Остаток меньше тика досыпаем busy-wait-ом по esp_timer, иначе контур
-    // систематически убегал бы вверх по периоду.
-    uint32_t ticks = us / (1000000 / configTICK_RATE_HZ);
-    uint32_t rest = us % (1000000 / configTICK_RATE_HZ);
-    if (ticks) {
-        vTaskDelay(ticks);
+    // Почему здесь аппаратный таймер, а не vTaskDelay.
+    //
+    // Refloat никогда не просит ровно 2000 мкс: он вычитает время своей
+    // итерации (main.c:1058-1059), поэтому реальный запрос — 1800 мкс и
+    // подобные. Тик FreeRTOS равен 1000 мкс, то есть такой интервал
+    // принципиально не выражается целым числом тиков.
+    //
+    // Прежняя реализация досыпала остаток циклом taskYIELD. Профилирование
+    // показало, что именно она и есть источник знаменитого «джиттера
+    // ±0.8 мс»: главный поток Refloat проводил в этом цикле по 800 мкс из
+    // каждых 1800, дёргая планировщик ядра 1 сотни раз подряд и мешая
+    // контуру (docs/realtime_timing.md §4).
+    //
+    // esp_timer работает от аппаратного таймера с разрешением 1 мкс и будит
+    // задачу уведомлением из обработчика прерывания. Ни квантования тиком,
+    // ни активного ожидания.
+    if (t && t->waker) {
+        esp_timer_start_once(t->waker, us);
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    } else {
+        // Вызов не из задачи Refloat (например, из инициализации): точность
+        // здесь не нужна, тика достаточно.
+        vTaskDelay(pdMS_TO_TICKS((us + 999) / 1000));
     }
-    if (rest) {
-        int64_t until = esp_timer_get_time() + rest;
-        while (esp_timer_get_time() < until) {
-            // короткое ожидание, вытеснение разрешено
-            taskYIELD();
-        }
+
+    if (t) {
+        // Проснулись — начинается новая итерация потока Refloat.
+        fc_timing_exec_begin((t == &S.threads[0]) ? FC_TIMING_MAIN : FC_TIMING_AUX);
     }
 }
 
@@ -131,12 +154,40 @@ static float if_ts_to_age_s(systime_t ts) {
 
 // ------------------------------------------------------------------ потоки
 
+// Обработчик таймера пробуждения. Выполняется в задаче esp_timer, поэтому
+// уведомление отправляется обычной, а не ISR-версией функции.
+static void waker_cb(void *arg) {
+    TaskHandle_t task = (TaskHandle_t) arg;
+    if (task) {
+        xTaskNotifyGive(task);
+    }
+}
+
 static void thread_trampoline(void *arg) {
     FcThread *t = (FcThread *) arg;
+
+    // Таймер пробуждения создаётся внутри самой задачи: ему нужен её
+    // дескриптор, который до старта ещё неизвестен.
+    esp_timer_create_args_t targs = {
+        .callback = waker_cb,
+        .arg = xTaskGetCurrentTaskHandle(),
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "fc_wake",
+    };
+    if (esp_timer_create(&targs, &t->waker) != ESP_OK) {
+        t->waker = NULL;
+        ESP_LOGW(TAG, "%s: таймер пробуждения не создан, ожидание пойдёт по тикам", t->name);
+    }
+
     // Задачи Refloat подписаны на TWDT: зависание контура должно быть видно.
     esp_task_wdt_add(NULL);
     t->fun(t->arg);
     esp_task_wdt_delete(NULL);
+    if (t->waker) {
+        esp_timer_stop(t->waker);
+        esp_timer_delete(t->waker);
+        t->waker = NULL;
+    }
     t->finished = true;
     t->handle = NULL;
     vTaskDelete(NULL);
@@ -316,34 +367,76 @@ static void if_set_pad_mode(void *gpio, uint32_t pin, uint32_t mode) {
 }
 
 // ------------------------------------------------------------------- мотор
-// Единственный путь наружу — logical_motor_*, а на этом этапе он заблокирован.
-// Прототипы объявлены здесь: compat/motor/logical_motor.h включать нельзя,
-// он тянет свои типы, а нам нужны только эти функции.
+//
+// Единственный путь наружу — fc_motor_gate_request(). Заполнены ВСЕ указатели
+// SDK, способные подать что-либо на мотор (vesc_c_if.h:436-447, 476, 653), а
+// не только те, которыми пользуется Refloat: оставленный NULL — это место,
+// куда однажды впишут прямой вызов backend-а мимо политики.
 
-void logical_motor_request_current(float amps);
-void logical_motor_request_brake_current(float amps);
-void logical_motor_request_duty(float duty);
-void logical_motor_set_current_off_delay(float seconds);
-void logical_motor_keepalive(void);
+static void gate(FcMotorRequestKind kind, float value) {
+    fc_motor_gate_request(kind, value, (uint64_t) esp_timer_get_time());
+}
 
 static void if_mc_set_current(float current) {
-    logical_motor_request_current(current);
+    gate(FC_MOTOR_REQ_CURRENT, current);
 }
 
 static void if_mc_set_brake_current(float current) {
-    logical_motor_request_brake_current(current);
+    gate(FC_MOTOR_REQ_BRAKE_CURRENT, current);
+}
+
+static void if_mc_set_current_rel(float v) {
+    gate(FC_MOTOR_REQ_CURRENT_REL, v);
+}
+
+static void if_mc_set_brake_current_rel(float v) {
+    gate(FC_MOTOR_REQ_BRAKE_CURRENT_REL, v);
 }
 
 static void if_mc_set_duty(float duty) {
-    logical_motor_request_duty(duty);
+    gate(FC_MOTOR_REQ_DUTY, duty);
+}
+
+static void if_mc_set_duty_noramp(float duty) {
+    gate(FC_MOTOR_REQ_DUTY_NORAMP, duty);
+}
+
+static void if_mc_set_pid_speed(float rpm) {
+    gate(FC_MOTOR_REQ_PID_SPEED, rpm);
+}
+
+static void if_mc_set_pid_pos(float pos) {
+    gate(FC_MOTOR_REQ_PID_POS, pos);
+}
+
+static void if_mc_set_handbrake(float current) {
+    gate(FC_MOTOR_REQ_HANDBRAKE, current);
+}
+
+static void if_mc_set_handbrake_rel(float v) {
+    gate(FC_MOTOR_REQ_HANDBRAKE_REL, v);
+}
+
+static void if_mc_release_motor(void) {
+    gate(FC_MOTOR_REQ_RELEASE, 0.0f);
+}
+
+static bool if_foc_play_tone(int channel, float freq, float voltage) {
+    // Звук на VESC издаётся подачей напряжения на обмотки, поэтому это тоже
+    // выход на мотор и он идёт через ту же политику.
+    (void) channel;
+    (void) freq;
+    gate(FC_MOTOR_REQ_TONE, voltage);
+    return false;
 }
 
 static void if_mc_set_current_off_delay(float d) {
-    logical_motor_set_current_off_delay(d);
+    // Не выход: параметр следующей команды тока, которой не будет.
+    (void) d;
 }
 
 static void if_timeout_reset(void) {
-    logical_motor_keepalive();
+    fc_motor_gate_keepalive();
 }
 
 // -------------------------------------------------------------- телеметрия
@@ -459,11 +552,21 @@ static bool if_read_eeprom_var(eeprom_var *v, int address) {
 }
 
 static bool if_store_eeprom_var(eeprom_var *v, int address) {
+    // Политика записи проверяется здесь, до всякого обращения к носителю
+    // (ТЗ v0.6A §24). Refloat получает честный false и печатает свою ошибку.
+    if (!fc_supervisor_config_write_allowed()) {
+        fc_storage_note_rejected_write();
+        return false;
+    }
     return fc_storage_write(v->as_u32, address);
 }
 
 static bool if_store_backup_data(void) {
-    return fc_storage_commit();
+    if (!fc_supervisor_config_write_allowed()) {
+        fc_storage_note_rejected_write();
+        return false;
+    }
+    return fc_storage_request_commit();
 }
 
 // ---------------------------------------------------------------- обмен с UI
@@ -565,9 +668,20 @@ void fc_vesc_if_init(void) {
     IF->io_read = if_io_read;
     IF->set_pad_mode = if_set_pad_mode;
 
+    // Все выходы на мотор — через Motor Gate, включая те, которых Refloat не
+    // использует: оставленный NULL стал бы дырой в политике.
     IF->mc_set_current = if_mc_set_current;
     IF->mc_set_brake_current = if_mc_set_brake_current;
+    IF->mc_set_current_rel = if_mc_set_current_rel;
+    IF->mc_set_brake_current_rel = if_mc_set_brake_current_rel;
     IF->mc_set_duty = if_mc_set_duty;
+    IF->mc_set_duty_noramp = if_mc_set_duty_noramp;
+    IF->mc_set_pid_speed = if_mc_set_pid_speed;
+    IF->mc_set_pid_pos = if_mc_set_pid_pos;
+    IF->mc_set_handbrake = if_mc_set_handbrake;
+    IF->mc_set_handbrake_rel = if_mc_set_handbrake_rel;
+    IF->mc_release_motor = if_mc_release_motor;
+    IF->foc_play_tone = if_foc_play_tone;
     IF->mc_set_current_off_delay = if_mc_set_current_off_delay;
     IF->timeout_reset = if_timeout_reset;
 
@@ -627,8 +741,6 @@ void fc_vesc_if_init(void) {
     IF->plot_set_graph = if_plot_set_graph;
     IF->plot_send_points = if_plot_send_points;
 
-    // Осознанно НЕ реализованы (Refloat проверяет указатель перед вызовом):
-    //   foc_play_tone — haptic через FOC, по CAN недоступен.
 
     // Значения «конфигурации ESC». ESC нет, поэтому это заведомо консервативные
     // числа; реальные придут по CAN на следующем этапе. Ток намеренно мал:

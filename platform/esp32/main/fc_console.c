@@ -1,48 +1,142 @@
-// Read-only диагностическая консоль FloatCore (ТЗ §15).
+// Диагностическая консоль FloatCore (ТЗ v0.6A §16, §17).
 //
-// Намеренно примитивна: одна строка — одна команда, разбор без библиотеки
-// console/argtable. Команд управления мотором нет и быть не может — этот файл
-// не имеет доступа ни к одной функции, способной что-то запросить у мотора.
+// Полный перечень команд с классификацией — docs/esp32_safety.md, раздел
+// «Инвентарь диагностических команд». Здесь та же классификация выражена
+// структурой файла:
 //
-// Доступно: status, tasks, timing, heap, config, safety, help.
+//   SAFE_READONLY   — ничего не меняют. Компилируются всегда.
+//   STATE_CHANGING  — меняют состояние системы, но физически безопасны.
+//                     Только при FC_LAB_DIAGNOSTICS.
+//   LAB_DIAGNOSTICS — намеренно ломают что-то, чтобы доказать, что механизм
+//                     безопасности работает. Только при FC_LAB_DIAGNOSTICS.
+//   SAFETY_BYPASS   — таких команд не существует.
+//   MOTOR_OUTPUT    — таких команд не существует.
+//
+// В профиле MOTOR_CAPABLE FC_LAB_DIAGNOSTICS равен нулю, поэтому две
+// последние категории кода просто не попадают в двоичный файл. Это не флаг,
+// который можно переключить: соответствующих функций там нет.
 
 #include "fc_platform.h"
+
 #include "../../../compat/refloat_glue/refloat_facade.h"
+#include "../../../compat/safety/fc_build_profile.h"
+#include "../../../compat/safety/fc_imu_health.h"
+#include "../../../compat/safety/fc_motor_gate.h"
+#include "../../../compat/safety/fc_supervisor.h"
+#include "../drivers/icm20948.h"
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
-#include "esp_task_wdt.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <fcntl.h>
+#include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <string.h>
-#include <fcntl.h>
 #include <unistd.h>
+
+// ============================================================ SAFE_READONLY
 
 static void cmd_status(void) {
     RefloatSnapshot s = refloat_facade_snapshot();
     printf("uptime            %.1f s\n", (double) fc_uptime_us() * 1e-6);
+    printf("profile           %s\n", FC_PROFILE_NAME);
     printf("reset reason      %s\n", fc_reset_reason_name());
     printf("boot #            %u (счётчик в NVS)\n", (unsigned) fc_boot_count());
+    printf("supervisor        %s\n", fc_supervisor_state_name(fc_supervisor_state()));
     printf("refloat state     %s\n", refloat_facade_state_name(s.state));
     printf("stop condition    %s\n", refloat_facade_stop_name(s.stop_condition));
-    printf("footpad           %s (adc %.2f / %.2f V)\n", refloat_facade_footpad_name(s.footpad_state),
-           (double) s.adc_left, (double) s.adc_right);
-    printf("pitch / roll      %.2f / %.2f deg\n", (double) s.pitch, (double) s.roll);
-    printf("balance pitch     %.2f deg\n", (double) s.balance_pitch);
-    printf("imu / main freq   %.1f / %.1f Hz (по счётчикам Refloat)\n",
-           (double) s.imu_frequency, (double) s.main_frequency);
-    printf("motor backend     %s\n", fc_motor_backend_name());
+    printf("footpad           %s (adc %.2f / %.2f V)\n",
+           refloat_facade_footpad_name(s.footpad_state), (double) s.adc_left,
+           (double) s.adc_right);
+    printf("pitch / roll      %.2f / %.2f deg (mock IMU)\n", (double) s.pitch, (double) s.roll);
+    printf("imu / main freq   %.1f / %.1f Hz (по счётчикам Refloat)\n", (double) s.imu_frequency,
+           (double) s.main_frequency);
+    printf("motor backend     %s\n", fc_motor_gate_backend_name());
     printf("can backend       %s\n", fc_can_backend_name());
 }
 
+static void cmd_supervisor(void) {
+    FcSupervisorStatus st = fc_supervisor_status();
+    uint64_t now = fc_uptime_us();
+    printf("state             %s (в этом состоянии %.1f s)\n", fc_supervisor_state_name(st.state),
+           (double) (now - st.state_since_us) * 1e-6);
+    printf("faults            %s (0x%08" PRIx32 "), latched 0x%08" PRIx32 "\n",
+           fc_supervisor_fault_name(st.faults), st.faults, st.faults_latched);
+    printf("переходов         %" PRIu32 ", входов в FAULT %" PRIu32 "\n", st.transitions,
+           st.fault_entries);
+    printf("motor output      %s\n",
+           fc_supervisor_motor_output_permitted() ? "РАЗРЕШЁН" : "запрещён");
+    printf("config write      %s\n",
+           fc_supervisor_config_write_allowed() ? "разрешена" : "запрещена");
+    printf("входы:\n");
+    printf("  platform_init   %d\n", st.inputs.platform_initialized);
+    printf("  config_valid    %d\n", st.inputs.config_valid);
+    printf("  loop_alive      %d (последний тик %.1f ms назад)\n", st.inputs.loop_alive,
+           st.last_loop_tick_us ? (double) (now - st.last_loop_tick_us) / 1000.0 : -1.0);
+    printf("  imu_healthy     %d (последний семпл %.1f ms назад)\n", st.inputs.imu_healthy,
+           st.last_imu_sample_us ? (double) (now - st.last_imu_sample_us) / 1000.0 : -1.0);
+    printf("  watchdog        %d\n", st.inputs.watchdog_healthy);
+    printf("  footpad_engaged %d\n", st.inputs.footpad_engaged);
+    printf("входы под будущие этапы (CAN ещё нет):\n");
+    printf("  esc_a/esc_b     %d / %d\n", st.inputs.esc_a_alive, st.inputs.esc_b_alive);
+    printf("  can_fresh       %d\n", st.inputs.can_fresh);
+    printf("  battery/thermal %d / %d\n", st.inputs.battery_ok, st.inputs.thermal_ok);
+}
+
+static void cmd_imu(void) {
+    const icm20948_config_t *cfg = icm20948_active_config();
+    icm20948_stats_t st = icm20948_stats();
+    FcImuHealthStatus h = fc_imu_health_status();
+
+    printf("драйвер           %s\n", fc_imu_real_available() ? "ICM-20948 работает" : "не поднят");
+    printf("шина              SDA=GPIO%d SCL=GPIO%d, %" PRIu32 " Гц, адрес 0x%02x\n",
+           cfg->sda_gpio, cfg->scl_gpio, cfg->i2c_hz, cfg->i2c_addr);
+    printf("шкалы             accel ±%.0f g (%.0f LSB/g), gyro ±%.0f °/с (%.1f LSB/(°/с))\n",
+           (double) icm20948_accel_fs_g(cfg->accel_fs),
+           (double) icm20948_accel_lsb_per_g(cfg->accel_fs),
+           (double) icm20948_gyro_fs_dps(cfg->gyro_fs),
+           (double) icm20948_gyro_lsb_per_dps(cfg->gyro_fs));
+    printf("ODR               %.1f Гц (SMPLRT_DIV=%u), DLPF cfg %u\n",
+           (double) icm20948_odr_hz(cfg->smplrt_div), cfg->smplrt_div, cfg->dlpf_cfg);
+    printf("транзакции        ok=%llu failed=%llu, средняя %.1f мкс, худшая %" PRIu32 " мкс\n",
+           (unsigned long long) st.reads_ok, (unsigned long long) st.reads_failed,
+           st.reads_ok ? (double) st.sum_transaction_us / (double) st.reads_ok : 0.0,
+           st.max_transaction_us);
+    printf("health            %s (семплов %llu, ошибок %llu, stuck %llu, stale %llu, timeout %llu)\n",
+           fc_imu_health_state_name(h.state), (unsigned long long) h.samples_total,
+           (unsigned long long) h.read_errors, (unsigned long long) h.stuck_events,
+           (unsigned long long) h.stale_events, (unsigned long long) h.timeout_events);
+
+    // Сырые значения в осях датчика. Никакого пересчёта в оси доски здесь
+    // нет и на этом этапе быть не должно (ТЗ v0.6A §4).
+    const FcImuRawSample *g = &h.last_good;
+    float mag = sqrtf(g->accel_g[0] * g->accel_g[0] + g->accel_g[1] * g->accel_g[1] +
+                      g->accel_g[2] * g->accel_g[2]);
+    printf("последний семпл   acc %+7.3f %+7.3f %+7.3f g |a|=%.3f\n", (double) g->accel_g[0],
+           (double) g->accel_g[1], (double) g->accel_g[2], (double) mag);
+    printf("                  gyro %+8.2f %+8.2f %+8.2f °/с, %.1f °C\n", (double) g->gyro_dps[0],
+           (double) g->gyro_dps[1], (double) g->gyro_dps[2], (double) g->temperature_c);
+    printf("оси               СЫРЫЕ, в системе координат датчика. Привязка к доске отложена\n");
+    printf("                  до финального монтажа (docs/esp32_architecture.md, v0.6B)\n");
+    printf("в Refloat         НЕ передаются: контур работает от mock (ТЗ v0.6A §29)\n");
+}
+
 static void cmd_tasks(void) {
-    printf("задачи Refloat (созданы через VESC_IF->spawn) и контур:\n");
-    printf("  %-14s свободно минимум %u B из 4096 (контур управления)\n", "fc_imu",
+    printf("задачи FloatCore:\n");
+    printf("  %-14s свободно минимум %u B из 4096 (контур, mock IMU)\n", "fc_imu",
            (unsigned) fc_imu_stack_watermark());
+    printf("  %-14s свободно минимум %u B из 4096 (чтение ICM-20948)\n", "fc_imu_hw",
+           (unsigned) fc_imu_real_stack_watermark());
+    printf("  %-14s свободно минимум %u B из 4096 (supervisor)\n", "fc_super",
+           (unsigned) fc_supervisor_stack_watermark());
+    printf("  %-14s свободно минимум %u B из 3072 (хранилище)\n", "fc_nvs",
+           (unsigned) fc_storage_stack_watermark());
     for (size_t i = 0; i < fc_thread_count(); ++i) {
-        printf("  %-14s свободно минимум %u B из 12288\n", fc_thread_name(i),
+        printf("  %-14s свободно минимум %u B из 12288 (задача Refloat)\n", fc_thread_name(i),
                (unsigned) fc_thread_stack_watermark(i));
     }
 #if CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS
@@ -59,15 +153,53 @@ static void print_timing(FcTimingChannel ch) {
         return;
     }
     double mean = (double) t.sum_period_us / (double) t.iterations;
-    printf("  %-26s iters %-8llu mean %8.1f us  min %6u  max %6u  late %u  (номинал %u us)\n",
-           t.name, (unsigned long long) t.iterations, mean, (unsigned) t.min_period_us,
-           (unsigned) t.max_period_us, (unsigned) t.late, (unsigned) t.nominal_period_us);
+    printf("  %-26s n=%llu номинал %" PRIu32 " us\n", t.name, (unsigned long long) t.iterations,
+           t.nominal_period_us);
+    printf("      период  mean %8.1f  p50 %6" PRIu32 "  p95 %6" PRIu32 "  p99 %6" PRIu32
+           "  p99.9 %6" PRIu32 "  min %6" PRIu32 "  max %6" PRIu32 "\n",
+           mean, t.p50_us, t.p95_us, t.p99_us, t.p999_us, t.min_period_us, t.max_period_us);
+    printf("      дедлайны late %" PRIu32 " (%.2f %%)  missed %" PRIu32 "  вне гистограммы %"
+           PRIu32 "\n",
+           t.late, 100.0 * (double) t.late / (double) t.iterations, t.missed, t.overflow);
+    if (t.exec_samples) {
+        printf("      исполнение mean %6.1f  p99 %6" PRIu32 "  min %6" PRIu32 "  max %6" PRIu32
+               " us\n",
+               (double) t.exec_sum_us / (double) t.exec_samples, t.exec_p99_us, t.exec_min_us,
+               t.exec_max_us);
+    }
 }
 
 static void cmd_timing(void) {
-    printf("периодичность (esp_timer, монотонный, 1 мкс):\n");
+    printf("периодичность (esp_timer, отметка в момент пробуждения задачи):\n");
     for (int i = 0; i < FC_TIMING_COUNT; ++i) {
         print_timing((FcTimingChannel) i);
+    }
+}
+
+static void cmd_timing_hist(void) {
+    static uint32_t bins[FC_TIMING_BINS + 1];
+    uint32_t width = 0;
+    uint32_t n = fc_timing_histogram(FC_TIMING_CONTROL, bins, FC_TIMING_BINS + 1, &width);
+    FcTimingStats t = fc_timing_get(FC_TIMING_CONTROL);
+    printf("гистограмма периодов контура, ширина корзины %" PRIu32 " мкс, всего %llu\n", width,
+           (unsigned long long) t.iterations);
+    uint32_t peak = 1;
+    for (uint32_t i = 0; i < n; ++i) {
+        if (bins[i] > peak) {
+            peak = bins[i];
+        }
+    }
+    for (uint32_t i = 0; i < n; ++i) {
+        if (!bins[i]) {
+            continue;
+        }
+        int len = (int) ((uint64_t) bins[i] * 50 / peak);
+        printf("  %6" PRIu32 "…%6" PRIu32 " us  %8" PRIu32 " ", i * width, (i + 1) * width,
+               bins[i]);
+        for (int k = 0; k < len; ++k) {
+            putchar('#');
+        }
+        printf("\n");
     }
 }
 
@@ -76,78 +208,95 @@ static void cmd_heap(void) {
     printf("min free heap     %u B\n", (unsigned) esp_get_minimum_free_heap_size());
     printf("largest block     %u B\n",
            (unsigned) heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-    printf("internal free     %u B\n",
-           (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+    printf("internal free     %u B\n", (unsigned) heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 static void cmd_config(void) {
     RefloatSnapshot s = refloat_facade_snapshot();
+    FcStorageStats st = fc_storage_stats();
     printf("custom config     %s\n", fc_config_registered() ? "зарегистрирован" : "НЕТ");
     printf("storage слов      %d (NVS)\n", fc_storage_capacity());
+    printf("запись сейчас     %s (supervisor %s)\n",
+           fc_supervisor_config_write_allowed() ? "разрешена" : "ЗАПРЕЩЕНА",
+           fc_supervisor_state_name(fc_supervisor_state()));
+    printf("статистика        принято=%llu отклонено=%llu коммитов=%llu (ошибок %llu)\n",
+           (unsigned long long) st.writes_accepted, (unsigned long long) st.writes_rejected,
+           (unsigned long long) st.commits_done, (unsigned long long) st.commits_failed);
+    printf("длительность      последний коммит %" PRIu32 " мкс, худший %" PRIu32 " мкс\n",
+           st.last_commit_us, st.max_commit_us);
     printf("fault_adc1/2      %.2f / %.2f V\n", (double) s.fault_adc1, (double) s.fault_adc2);
     printf("test param        %.3f (leds.status.brightness_headlights_off)\n",
            (double) refloat_facade_config_test_value());
-    printf("пределы тока      %.1f / %.1f A\n", (double) s.motor_current_max,
-           (double) s.motor_current_min);
-    printf("батарея           %.1f / %.1f A\n", (double) s.motor_batt_current_max,
-           (double) s.motor_batt_current_min);
 }
 
 static void cmd_safety(void) {
-    FcMotorStats m = fc_motor_stats();
-    RefloatSnapshot s = refloat_facade_snapshot();
-    printf("motor backend     %s\n", fc_motor_backend_name());
-    printf("can backend       %s\n", fc_can_backend_name());
-    printf("blocked total     %llu\n", (unsigned long long) m.total_blocked);
-    printf("  set_current     %llu (последний запрос %.3f A)\n",
-           (unsigned long long) m.blocked[FC_MOTOR_CMD_CURRENT],
-           (double) m.last_value[FC_MOTOR_CMD_CURRENT]);
-    printf("  set_brake       %llu (последний запрос %.3f A)\n",
-           (unsigned long long) m.blocked[FC_MOTOR_CMD_BRAKE],
-           (double) m.last_value[FC_MOTOR_CMD_BRAKE]);
-    printf("  set_duty        %llu (последний запрос %.3f)\n",
-           (unsigned long long) m.blocked[FC_MOTOR_CMD_DUTY],
-           (double) m.last_value[FC_MOTOR_CMD_DUTY]);
-    printf("timeout_reset     %llu\n", (unsigned long long) m.keepalive_calls);
-    printf("footpad           %s — %s\n", refloat_facade_footpad_name(s.footpad_state),
-           s.footpad_state == 0 ? "disengaged, как и требуется" : "ВНИМАНИЕ: не disengaged");
-    printf("adc платформы     %.2f V (порог %.2f/%.2f V)\n", (double) fc_adc_safe_voltage(),
-           (double) s.fault_adc1, (double) s.fault_adc2);
+    fc_print_safety_line();
+    FcMotorGateStats g = fc_motor_gate_stats();
+    printf("  по видам запросов:\n");
+    for (int i = 0; i < FC_MOTOR_REQ_KIND_COUNT; ++i) {
+        if (!g.by_kind[i]) {
+            continue;
+        }
+        printf("    %-22s %llu (последнее значение %.3f)\n",
+               fc_motor_gate_kind_name((FcMotorRequestKind) i), (unsigned long long) g.by_kind[i],
+               (double) g.last_value[i]);
+    }
+    printf("  timeout_reset  %llu (продление watchdog, тяги не запрашивает)\n",
+           (unsigned long long) g.keepalive_calls);
 }
 
-// Единственная команда, которая что-то меняет. Не имеет отношения к мотору:
-// пишет косметический параметр яркости и гоняет его через штатный путь
-// сохранения Refloat, чтобы доказать persistence (ТЗ §12).
+// ========================================================== STATE_CHANGING
+#if FC_LAB_DIAGNOSTICS
+
+static void cmd_ready(void) {
+    bool ok = fc_supervisor_request_ready(fc_uptime_us());
+    printf("supervisor: переход в READY %s, состояние %s\n", ok ? "выполнен" : "ОТКЛОНЁН",
+           fc_supervisor_state_name(fc_supervisor_state()));
+    if (!ok) {
+        printf("  причина: не выполнены условия или активен отказ — см. `supervisor`\n");
+    }
+    printf("  запись конфигурации теперь %s\n",
+           fc_supervisor_config_write_allowed() ? "разрешена" : "запрещена");
+    printf("  выход на мотор: %s (в LAB_SAFE не разрешает ни одно состояние)\n",
+           fc_supervisor_motor_output_permitted() ? "РАЗРЕШЁН" : "запрещён");
+}
+
+static void cmd_disarm(void) {
+    fc_supervisor_disarm(fc_uptime_us());
+    printf("supervisor: состояние %s, запись конфигурации %s\n",
+           fc_supervisor_state_name(fc_supervisor_state()),
+           fc_supervisor_config_write_allowed() ? "разрешена" : "запрещена");
+}
+
+static void cmd_fault_clear(void) {
+    bool ok = fc_supervisor_clear_fault(fc_uptime_us());
+    printf("supervisor: снятие отказа %s, состояние %s, активные причины %s\n",
+           ok ? "выполнено" : "ОТКЛОНЕНО (причина всё ещё активна)",
+           fc_supervisor_state_name(fc_supervisor_state()),
+           fc_supervisor_fault_name(fc_supervisor_status().faults));
+}
+
 static void cmd_persist(void) {
     float before = refloat_facade_config_test_value();
     float next = (before >= 0.9f) ? 0.25f : before + 0.1f;
     printf("persist: leds.status.brightness_headlights_off %.3f -> %.3f\n", (double) before,
            (double) next);
+    printf("persist: политика записи сейчас %s (supervisor %s)\n",
+           fc_supervisor_config_write_allowed() ? "разрешает" : "ЗАПРЕЩАЕТ",
+           fc_supervisor_state_name(fc_supervisor_state()));
     bool ok = refloat_facade_config_save_test(next);
     printf("persist: set_cfg вернул %s\n", ok ? "true" : "false");
-    printf("persist: коммит NVS %s\n", fc_storage_commit() ? "выполнен" : "НЕ выполнен");
+    FcStorageStats st = fc_storage_stats();
+    printf("persist: записей принято %llu, отклонено %llu\n",
+           (unsigned long long) st.writes_accepted, (unsigned long long) st.writes_rejected);
     printf("persist: значение в конфигурации сейчас %.3f\n",
            (double) refloat_facade_config_test_value());
-    printf("persist: перезагрузите плату и вызовите `config` — значение обязано сохраниться\n");
+    printf("persist: коммит выполняет отдельная задача хранилища, не контур\n");
 }
 
-// --- диагностические команды, требующие явного подтверждения в имени -------
-// Ни одна из них не имеет отношения к мотору. Нужны, чтобы доказать
-// требования ТЗ §11 (watchdog) и §14 (panic с backtrace) на живой плате.
-
-static void cmd_wdtest(void) {
-    printf("wdtest: контур перестаёт отмечаться в TWDT на 8 с при таймауте %d с\n",
-           CONFIG_ESP_TASK_WDT_TIMEOUT_S);
-    printf("wdtest: ожидается предупреждение TWDT с backtrace задачи fc_imu\n");
-    fc_imu_inject_stall(8000);
-}
-
-static void cmd_crashtest(void) {
-    printf("crashtest: намеренное разыменование нулевого указателя, panic должен\n");
-    printf("           напечатать причину, регистры, backtrace и ОСТАНОВИТЬСЯ\n");
-    fflush(stdout);
-    volatile int *p = (volatile int *) 0;
-    *p = 1;
+static void cmd_timing_reset(void) {
+    fc_timing_reset();
+    printf("статистика тайминга обнулена\n");
 }
 
 static void cmd_restart(void) {
@@ -157,10 +306,117 @@ static void cmd_restart(void) {
     esp_restart();
 }
 
+// ========================================================= LAB_DIAGNOSTICS
+// Намеренно ломают подсистему, чтобы доказать, что защита срабатывает.
+// Ни одна из них не способна подать что-либо на мотор: единственный путь к
+// мотору — Motor Gate, а backend физической отправки в этой сборке не
+// существует как код.
+
+static void cmd_wdtest(void) {
+    printf("wdtest: контур перестаёт отмечаться на 8 с при таймауте TWDT %d с\n",
+           CONFIG_ESP_TASK_WDT_TIMEOUT_S);
+    printf("  ожидается: сначала FAULT супервизора (таймаут контура %d мс), затем TWDT\n",
+           FC_SUP_LOOP_TIMEOUT_US / 1000);
+    fc_imu_inject_stall(8000);
+}
+
+static void cmd_crashtest(void) {
+    printf("crashtest: намеренное разыменование нулевого указателя\n");
+    fflush(stdout);
+    volatile int *p = (volatile int *) 0;
+    *p = 1;
+}
+
+// Остановка/запуск задачи чтения датчика. Нужна, чтобы снять прогоны A и B
+// (ТЗ v0.6A §20) на одной и той же прошивке: иначе сравнивались бы разные
+// двоичные файлы, и разницу нельзя было бы приписать именно IMU.
+static void cmd_imu_stop(void) {
+    fc_imu_real_stop();
+    printf("imu-stop: задача чтения ICM-20948 останавливается\n");
+    printf("  контур это не затрагивает: он работает от mock\n");
+}
+
+static void cmd_imu_start(void) {
+    bool ok = fc_imu_real_start();
+    printf("imu-start: %s\n", ok ? "задача чтения запущена" : "датчик не отвечает");
+}
+
+static void cmd_imu_fail(void) {
+    printf("imu-fail: следующие 500 чтений ICM-20948 завершатся ошибкой\n");
+    printf("  ожидается: health READ_ERROR -> supervisor FAULT (IMU_UNHEALTHY)\n");
+    icm20948_inject_read_failures(500);
+}
+
+static void cmd_imu_freeze(void) {
+    printf("imu-freeze: следующие 500 чтений вернут один и тот же семпл\n");
+    printf("  ожидается: health STUCK -> supervisor FAULT (IMU_UNHEALTHY)\n");
+    icm20948_inject_frozen(500);
+}
+
+#endif  // FC_LAB_DIAGNOSTICS
+
 static void cmd_help(void) {
-    printf("команды: status | tasks | timing | heap | config | safety | persist | restart | help\n");
-    printf("диагностика: wdtest-confirm (проверка watchdog), crashtest-confirm (проверка panic)\n");
-    printf("команд управления мотором нет и не будет на этом этапе (ТЗ v0.5 §15)\n");
+    printf("диагностика (read-only): status | supervisor | imu | timing | timing-hist | tasks |\n");
+    printf("                         heap | config | safety | help\n");
+#if FC_LAB_DIAGNOSTICS
+    printf("меняют состояние:        ready | disarm | fault-clear | persist | timing-reset |\n");
+    printf("                         restart\n");
+    printf("проверка защит:          wdtest-confirm | crashtest-confirm | imu-fail-confirm |\n");
+    printf("                         imu-freeze-confirm | imu-stop-confirm | imu-start\n");
+#endif
+    printf("профиль сборки:          %s\n", FC_PROFILE_NAME);
+    printf("команд управления мотором нет: в этой сборке нет кода, способного что-либо\n");
+    printf("отправить — см. docs/esp32_safety.md\n");
+}
+
+static void dispatch(const char *line) {
+    if (!strcmp(line, "status")) {
+        cmd_status();
+    } else if (!strcmp(line, "supervisor")) {
+        cmd_supervisor();
+    } else if (!strcmp(line, "imu")) {
+        cmd_imu();
+    } else if (!strcmp(line, "tasks")) {
+        cmd_tasks();
+    } else if (!strcmp(line, "timing")) {
+        cmd_timing();
+    } else if (!strcmp(line, "timing-hist")) {
+        cmd_timing_hist();
+    } else if (!strcmp(line, "heap")) {
+        cmd_heap();
+    } else if (!strcmp(line, "config")) {
+        cmd_config();
+    } else if (!strcmp(line, "safety")) {
+        cmd_safety();
+#if FC_LAB_DIAGNOSTICS
+    } else if (!strcmp(line, "ready")) {
+        cmd_ready();
+    } else if (!strcmp(line, "disarm")) {
+        cmd_disarm();
+    } else if (!strcmp(line, "fault-clear")) {
+        cmd_fault_clear();
+    } else if (!strcmp(line, "persist")) {
+        cmd_persist();
+    } else if (!strcmp(line, "timing-reset")) {
+        cmd_timing_reset();
+    } else if (!strcmp(line, "restart")) {
+        cmd_restart();
+    } else if (!strcmp(line, "wdtest-confirm")) {
+        cmd_wdtest();
+    } else if (!strcmp(line, "crashtest-confirm")) {
+        cmd_crashtest();
+    } else if (!strcmp(line, "imu-stop-confirm")) {
+        cmd_imu_stop();
+    } else if (!strcmp(line, "imu-start")) {
+        cmd_imu_start();
+    } else if (!strcmp(line, "imu-fail-confirm")) {
+        cmd_imu_fail();
+    } else if (!strcmp(line, "imu-freeze-confirm")) {
+        cmd_imu_freeze();
+#endif
+    } else {
+        cmd_help();
+    }
 }
 
 static void console_task(void *arg) {
@@ -178,29 +434,7 @@ static void console_task(void *arg) {
             line[len] = 0;
             if (len) {
                 printf("\n");
-                if (!strcmp(line, "status")) {
-                    cmd_status();
-                } else if (!strcmp(line, "tasks")) {
-                    cmd_tasks();
-                } else if (!strcmp(line, "timing")) {
-                    cmd_timing();
-                } else if (!strcmp(line, "heap")) {
-                    cmd_heap();
-                } else if (!strcmp(line, "config")) {
-                    cmd_config();
-                } else if (!strcmp(line, "safety")) {
-                    cmd_safety();
-                } else if (!strcmp(line, "persist")) {
-                    cmd_persist();
-                } else if (!strcmp(line, "restart")) {
-                    cmd_restart();
-                } else if (!strcmp(line, "wdtest-confirm")) {
-                    cmd_wdtest();
-                } else if (!strcmp(line, "crashtest-confirm")) {
-                    cmd_crashtest();
-                } else {
-                    cmd_help();
-                }
+                dispatch(line);
                 fflush(stdout);
             }
             len = 0;
@@ -215,8 +449,6 @@ static void console_task(void *arg) {
 }
 
 void fc_console_start(void) {
-    // stdin по умолчанию блокирующий и построчный; переводим в неблокирующий
-    // посимвольный режим, иначе задача заняла бы UART монопольно.
     setvbuf(stdin, NULL, _IONBF, 0);
     fcntl(fileno(stdin), F_SETFL, fcntl(fileno(stdin), F_GETFL) | O_NONBLOCK);
     xTaskCreatePinnedToCore(console_task, "fc_console", 4096, NULL, FC_PRIO_CONSOLE, NULL,
