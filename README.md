@@ -12,9 +12,20 @@ VESC Tool / приложение  ──BLE/Wi-Fi──►  ESP32
                                          └─ Motor abstraction ──CAN──► VESC A + VESC B
 ```
 
-## Статус: Этап 0.4.1 — совместимость с VESC Tool + Virtual mcConfig
+## Статус: Этап 0.5 — первый запуск на физической ESP32
 
-Реальный вывод на моторы не активирован, платы ESP32 ещё нет. Готово:
+Реальный вывод на моторы не активирован. **Неизменённый Refloat 1.3.0 запущен на
+живой плате ESP32-D0WD-V3**: контур управления идёт 500 Гц, команды мотору
+блокируются, CAN отсутствует. Подробности — в
+[docs/esp32_board_bringup.md](docs/esp32_board_bringup.md) и
+[docs/esp32_safety.md](docs/esp32_safety.md).
+
+Готово:
+
+* **прошивка ESP32 на официальном ESP-IDF v5.5.5**: те же исходники Refloat и те же
+  общие слои, что и в host-сборке; отличается только реализация платформы;
+* платформенный backend `VESC_IF` поверх FreeRTOS, mock-IMU, безопасный ADC,
+  NVS вместо EEPROM, read-only диагностическая консоль;
 
 * аудит зависимостей Refloat и контракт платформенного слоя;
 * host-харнесс, в котором **неизменённые исходники Refloat собираются и исполняются
@@ -64,7 +75,10 @@ Refloat не защищает себя сам — это обязанность 
 | [docs/refloat_vesc_api_dependencies.md](docs/refloat_vesc_api_dependencies.md) | **Основной результат.** Полный инвентарь 74 зависимостей от VESC/LispBM по категориям, с выделением realtime-пути и правилами агрегации двух VESC |
 | [docs/refloat_architecture.md](docs/refloat_architecture.md) | Как Refloat устроен и работает на VESC |
 | [docs/porting_strategy.md](docs/porting_strategy.md) | Аргументированный выбор Strategy A/B/C |
-| [docs/esp32_architecture.md](docs/esp32_architecture.md) | Проект прошивки: задачи, тайминг, motor abstraction, supervisor, план тестирования |
+| [docs/esp32_architecture.md](docs/esp32_architecture.md) | Устройство прошивки: задачи, тайминг, motor abstraction, supervisor, план тестирования; §0 — что уже реализовано |
+| [docs/esp32_board_bringup.md](docs/esp32_board_bringup.md) | **Результаты запуска на живой плате:** железо, toolchain, тайминг контура, память, watchdog, persistence, циклы загрузки |
+| [docs/esp32_safety.md](docs/esp32_safety.md) | Почему прошивка v0.5 физически не может сформировать команду мотору или кадр CAN |
+| [docs/qml_parse_error_606.md](docs/qml_parse_error_606.md) | Разбор ошибки `Expected token numeric literal` в QML Scripting VESC Tool 6.06 |
 | [docs/risk_register.md](docs/risk_register.md) | 20 рисков с оценкой и мерами |
 | [docs/vesc_if_contract.md](docs/vesc_if_contract.md) | **Контракт платформенного слоя:** все 74 функции по 8 категориям — сигнатура, места вызова, частота, участие в контуре, синхронизация, источник данных, требование по задержке, поведение при отказе |
 | [docs/motor_semantics.md](docs/motor_semantics.md) | Семантика `mc_*` и правила агрегации A/B с обоснованием по каждому месту использования |
@@ -127,4 +141,9 @@ git submodule update --init
 ## Безопасность
 
 Мотор не запускается, CAN-команды тока не отправляются, самобалансировка не реализуется —
-до завершения архитектурного этапа и стендовых проверок (ТЗ §16).
+до завершения архитектурного этапа и стендовых проверок.
+
+В прошивке ESP32 это не декларация: в `.elf` нет ни одного символа TWAI, пины CAN не
+конфигурируются, трансивер не подключён, а все пять функций запроса тяги ведут в
+счётчик блокировок. Проверка отсутствия CAN-передатчика автоматизирована в
+`tools/esp32_smoke.sh`. Полное обоснование — [docs/esp32_safety.md](docs/esp32_safety.md).

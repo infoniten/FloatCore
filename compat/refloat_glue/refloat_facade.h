@@ -16,6 +16,10 @@ typedef struct {
     int stop_condition;   // StopCondition
     int footpad_state;    // FootpadSensorState: 0 NONE, 1 LEFT, 2 RIGHT, 3 BOTH
     float adc_left, adc_right;
+    // Пороги срабатывания footpad из конфигурации: нужны, чтобы доказать, что
+    // отданное платформой напряжение действительно означает disengaged
+    // (footpad_sensor.c:31 — порог 0 означает «датчик всегда нажат»).
+    float fault_adc1, fault_adc2;
     float pitch, balance_pitch, roll, pitch_rate;
     float setpoint, setpoint_target;
     float balance_current;
@@ -42,3 +46,18 @@ RefloatSnapshot refloat_facade_snapshot(void);
 const char *refloat_facade_state_name(int state);
 const char *refloat_facade_stop_name(int stop_condition);
 const char *refloat_facade_footpad_name(int fs);
+
+// --------------------------------------------------- проверка persistence
+//
+// Гоняет конфигурацию Refloat через его же путь сохранения — тот самый, что
+// использует VESC Tool: зарегистрированный через conf_custom_add_config
+// set_cfg() десериализует данные и вызывает write_cfg_to_eeprom().
+//
+// Меняется только `leds.status.brightness_headlights_off` — яркость фар в
+// статус-баре. Параметр выбран потому, что он не участвует ни в одном
+// вычислении контура, а лента к плате не подключена вовсе.
+//
+// Платформа обязана предоставить floatcore_config_apply(): вызов сохранённого
+// указателя set_cfg.
+bool refloat_facade_config_save_test(float value);
+float refloat_facade_config_test_value(void);

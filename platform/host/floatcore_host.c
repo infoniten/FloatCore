@@ -6,14 +6,14 @@
 //   * TCP-сервер говорит на оригинальном протоколе VESC;
 //   * LogicalMotor остаётся mock-ом: вывод на моторы физически невозможен.
 //
-// Заголовки Refloat здесь не подключаются (см. tests/host/harness/refloat_facade.h).
+// Заголовки Refloat здесь не подключаются (см. compat/refloat_glue/refloat_facade.h).
 
 #include "../../compat/config/floatcore_limits.h"
 #include "../../compat/motor/logical_motor.h"
 #include "../../compat/vesc_protocol/commands.h"
 #include "../../tests/host/mock/logical_motor_mock.h"
 #include "../../tests/host/mock/mock_vesc_if.h"
-#include "../../tests/host/harness/refloat_facade.h"
+#include "../../compat/refloat_glue/refloat_facade.h"
 #include "qml_app.h"
 #include "transport.h"
 

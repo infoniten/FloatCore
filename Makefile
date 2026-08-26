@@ -50,18 +50,19 @@ MOCK_SRC := $(ROOT)/compat/config/floatcore_limits.c \
             $(ROOT)/tests/host/mock/mock_vesc_if.c \
             $(ROOT)/tests/host/mock/logical_motor_mock.c \
             $(ROOT)/tests/host/mock/led_driver_host.c \
-            $(ROOT)/tests/host/harness/refloat_facade.c
+            $(ROOT)/compat/refloat_glue/refloat_facade.c
 
-REFLOAT_INC := -I$(ROOT)/tests/host/mock -I$(ROOT)/tests/host/harness \
+REFLOAT_INC := -I$(ROOT)/compat/vesc_api -I$(ROOT)/tests/host/mock -I$(ROOT)/compat/refloat_glue \
                -I$(RSRC) -I$(RSRC)/conf -I$(GEN)
 
+ESP32_TESTS_BIN := $(BIN)/esp32_platform_tests
 HOST_TESTS_BIN := $(BIN)/refloat_host_tests
 PROTO_TESTS_BIN := $(BIN)/protocol_tests
 HOST_BIN := $(BIN)/floatcore_host
 
-.PHONY: all test test-all integration gen clean host host-tests protocol-tests
+.PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32
 
-all: $(HOST_TESTS_BIN) $(PROTO_TESTS_BIN) $(HOST_BIN)
+all: $(HOST_TESTS_BIN) $(PROTO_TESTS_BIN) $(HOST_BIN) $(ESP32_TESTS_BIN)
 
 # ----------------------------------------------------------------- генерация
 
@@ -116,7 +117,7 @@ HT_SRC := $(REFLOAT_SRC) $(GEN_SRC) $(MOCK_SRC) \
           $(ROOT)/tests/host/scenarios.c $(ROOT)/tests/host/runner.c
 HT_OBJ := $(patsubst %,$(OBJ)/ht_%.o,$(notdir $(basename $(HT_SRC))))
 
-HT_VPATH := $(RSRC) $(RSRC)/filters $(RSRC)/lib $(RSRC)/conf $(GEN)/conf $(ROOT)/tests/host $(ROOT)/tests/host/mock $(ROOT)/tests/host/harness
+HT_VPATH := $(RSRC) $(RSRC)/filters $(RSRC)/lib $(RSRC)/conf $(GEN)/conf $(ROOT)/tests/host $(ROOT)/tests/host/mock $(ROOT)/compat/refloat_glue
 
 $(OBJ)/ht_%.o: $(ROOT)/compat/config/%.c
 	@mkdir -p $(OBJ)
@@ -176,11 +177,13 @@ $(HOST_BIN): $(FH_OBJ)
 
 # --------------------------------------------------------------------- запуск
 
-test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN)
+test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN)
 	@echo ""
 	$(PROTO_TESTS_BIN)
 	@echo ""
 	$(HOST_TESTS_BIN)
+	@echo ""
+	$(ESP32_TESTS_BIN)
 
 # Интеграционный прогон поднимает FloatCore Host и говорит с ним по настоящему
 # протоколу VESC — то же, что делает VESC Tool, только без GUI.
@@ -192,7 +195,43 @@ test-all: test integration
 host: $(HOST_BIN)
 	$(HOST_BIN) $(ARGS)
 
+# ------------------------------------------------- тесты платформы ESP32 (host)
+# Модули platform/esp32/main собираются поверх заглушек tests/esp32/stubs:
+# проверяется логика (безопасный ADC, блокировка мотора, тайминг), для которой
+# плата не нужна. Компиляция самой прошивки проверяется целью `esp32`.
+
+E32_SRC := $(ROOT)/platform/esp32/main/fc_adc_safe.c \
+           $(ROOT)/platform/esp32/main/fc_timing.c \
+           $(ROOT)/platform/esp32/main/fc_motor_blocked.c \
+           $(ROOT)/tests/esp32/stubs/stubs.c \
+           $(ROOT)/tests/esp32/test_esp32_platform.c
+E32_OBJ := $(patsubst %,$(OBJ)/e32_%.o,$(notdir $(basename $(E32_SRC))))
+E32_CFLAGS := $(BASE_CFLAGS) -I$(ROOT)/tests/esp32/stubs
+
+$(OBJ)/e32_%.o: $(ROOT)/platform/esp32/main/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(E32_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/e32_%.o: $(ROOT)/tests/esp32/stubs/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(E32_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/e32_%.o: $(ROOT)/tests/esp32/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(E32_CFLAGS) -MMD -MP -c $< -o $@
+
+$(ESP32_TESTS_BIN): $(E32_OBJ)
+	@mkdir -p $(BIN)
+	$(CC) $^ -lm -o $@
+
+esp32-tests: $(ESP32_TESTS_BIN)
+
+# Сборка настоящей прошивки. Требует . ~/esp/esp-idf/export.sh
+esp32:
+	cd $(ROOT)/platform/esp32 && idf.py build
+
 clean:
-	rm -rf $(OBJ) $(BIN)/refloat_host_tests $(BIN)/protocol_tests $(BIN)/floatcore_host
+	rm -rf $(OBJ) $(BIN)/refloat_host_tests $(BIN)/protocol_tests $(BIN)/floatcore_host \
+	       $(BIN)/esp32_platform_tests
 
 -include $(OBJ)/*.d

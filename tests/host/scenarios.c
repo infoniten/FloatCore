@@ -3,7 +3,7 @@
 // Ни один сценарий не трогает реальное железо: выходы на мотор перехватываются
 // mock-платформой и mock-реализацией LogicalMotor.
 //
-// Этот файл НЕ включает заголовки Refloat (см. harness/refloat_facade.h).
+// Этот файл НЕ включает заголовки Refloat (см. compat/refloat_glue/refloat_facade.h).
 
 #include "scenarios.h"
 

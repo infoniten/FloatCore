@@ -1,8 +1,53 @@
-# Архитектура прошивки ESP32 (проект, этап 0)
+# Архитектура прошивки ESP32
 
 Документ описывает целевое устройство системы, вытекающее из аудита
 ([refloat_vesc_api_dependencies.md](refloat_vesc_api_dependencies.md)) и выбранной
-Strategy B ([porting_strategy.md](porting_strategy.md)). Код на этом этапе не пишется.
+Strategy B ([porting_strategy.md](porting_strategy.md)).
+
+**Статус: частично реализовано начиная с v0.5.** Разделы 1–9 описывают цель;
+раздел 0 ниже фиксирует, что из этого уже работает на живой плате, а что нет.
+Фактические результаты запуска — в [esp32_board_bringup.md](esp32_board_bringup.md),
+обоснование блокировки выхода — в [esp32_safety.md](esp32_safety.md).
+
+---
+
+## 0. Что реализовано на v0.5
+
+Собрано и проверено на ESP32-D0WD-V3 rev v3.1 (ESP-IDF v5.5.5).
+
+```
+refloat-upstream/src              неизменённый Refloat 1.3.0 (47a2c5ce)
+        │  74 функции VESC_IF
+compat/vesc_api/vesc_c_if.h       общий shim: VESC_IF -> floatcore_vesc_if
+compat/refloat_glue/              общий путь запуска: refloat_init()
+        │
+platform/esp32/main/fc_vesc_if.c  реализация VESC_IF поверх FreeRTOS
+        ├── fc_imu_mock.c         mock-IMU 500 Гц, задаёт ритм контура
+        ├── fc_adc_safe.c         footpad всегда disengaged
+        ├── fc_motor_blocked.c    logical_motor.h -> BLOCKED, CAN отсутствует
+        ├── fc_storage_nvs.c      eeprom_var -> NVS
+        ├── fc_timing.c           статистика периодов по esp_timer
+        ├── fc_led_driver.c       замена led_driver.c (STM32) -> заглушка
+        └── fc_console.c          read-only диагностика
+        │
+ESP-IDF / FreeRTOS                tick 1000 Гц, TWDT, panic-halt
+```
+
+| Раздел | Проект | Состояние v0.5 |
+|---|---|---|
+| §2 задачи и приоритеты | 6 задач, супервизор | реализованы 3: `fc_imu` (prio 14), `Refloat Main` (12), `Refloat Aux` (10), все на ядре 1. Супервизора, `can_rx` и `comms` нет |
+| §3 модель времени | esp_timer + `vTaskDelayUntil` | реализовано; измерено 2000.0 мкс среднего периода при джиттере ±0.8 мс |
+| §4 IMU | ICM-20948 по SPI + DRDY | mock: покой, 500 Гц, контракт (радианы / рад/с / g) выведен из upstream |
+| §5 логический мотор | агрегация двух VESC + supervisor | **заблокирован**: команды считаются и отбрасываются |
+| §6 CAN | TWAI 1 Мбит/с | **отсутствует**: ни одного символа TWAI в прошивке |
+| §7 хранение | NVS, namespace `refloat` | реализовано: namespace `floatcore`, 128 слов одним blob |
+| §8 транспорт UI | BLE/UART + протокол VESC | не переносился; радио выключено |
+
+Отличие от проекта, которое стоит отметить: приоритет `Refloat Aux` получается
+не назначением, а вызовом самого Refloat — `thread_set_priority(-1)`
+(`main.c:1113`), который наш backend отображает в шкалу FreeRTOS.
+
+---
 
 ## 1. Слои
 

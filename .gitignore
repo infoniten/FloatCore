@@ -2,3 +2,11 @@ build/
 .DS_Store
 __pycache__/
 *.pyc
+
+# ESP-IDF: артефакты сборки и сгенерированная конфигурация проекта.
+# sdkconfig.defaults версионируется, сам sdkconfig — нет.
+platform/esp32/build/
+platform/esp32/sdkconfig
+platform/esp32/sdkconfig.old
+platform/esp32/managed_components/
+dependencies.lock

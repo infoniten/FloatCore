@@ -89,7 +89,7 @@ static struct {
 
 static __thread MockThread *current_thread = NULL;
 
-vesc_c_if *mock_vesc_if = NULL;
+vesc_c_if *floatcore_vesc_if = NULL;
 static vesc_c_if IF;
 static void *refloat_arg = NULL;
 static void **arg_slot = &refloat_arg;
@@ -258,7 +258,7 @@ static void **if_get_arg(uint32_t prog_addr) {
     return arg_slot;
 }
 
-void mock_set_arg_slot(void **slot) {
+void floatcore_set_arg_slot(void **slot) {
     arg_slot = slot ? slot : &refloat_arg;
 }
 
@@ -748,7 +748,7 @@ void mock_init(void) {
     // Осознанно НЕ реализованы (Refloat проверяет указатель перед вызовом):
     //   foc_play_tone — haptic через FOC, по CAN недоступен
 
-    mock_vesc_if = &IF;
+    floatcore_vesc_if = &IF;
     arg_slot = &refloat_arg;
     refloat_arg = NULL;
 
@@ -786,7 +786,7 @@ void mock_deinit(void) {
         }
     }
     M.thread_count = 0;
-    mock_vesc_if = NULL;
+    floatcore_vesc_if = NULL;
 }
 
 void mock_set_log_sink(void (*sink)(const char *, va_list)) {
@@ -1008,4 +1008,10 @@ void mock_cfg_set_int(int p, int v) {
 
 size_t mock_stats_nan_current_requests(void) {
     return M.nan_current_requests;
+}
+
+// Вызов зарегистрированного Refloat set_cfg — общий контракт платформы,
+// используется refloat_facade_config_save_test().
+bool floatcore_config_apply(uint8_t *data) {
+    return M.cfg_set ? M.cfg_set(data) : false;
 }

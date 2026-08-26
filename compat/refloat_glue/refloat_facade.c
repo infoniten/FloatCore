@@ -4,10 +4,12 @@
 #include "refloat_facade.h"
 
 #include "data.h"
+#include "conf/confparser.h"
 #include "vesc_c_if.h"
 
-// объявлено в mock_vesc_if.h, который нельзя включать вместе с заголовками Refloat
-void mock_set_arg_slot(void **slot);
+// Реализуется backend-ом платформы (host-mock или platform/esp32). Объявляется здесь,
+// потому что заголовки backend-ов нельзя включать вместе с заголовками Refloat.
+void floatcore_set_arg_slot(void **slot);
 
 // init() Refloat, переименованный макросом INIT_FUN в нашем shim-заголовке
 bool refloat_init(lib_info *info);
@@ -18,7 +20,7 @@ static bool started = false;
 bool refloat_facade_start(void) {
     // ARG раскрывается в *VESC_IF->get_arg(); на VESC это ячейка lib_info.arg,
     // которой владеет загрузчик. Воспроизводим это.
-    mock_set_arg_slot(&info.arg);
+    floatcore_set_arg_slot(&info.arg);
     started = refloat_init(&info);
     return started;
 }
@@ -47,6 +49,8 @@ RefloatSnapshot refloat_facade_snapshot(void) {
     s.footpad_state = d->footpad.state;
     s.adc_left = d->footpad.adc_left;
     s.adc_right = d->footpad.adc_right;
+    s.fault_adc1 = d->float_conf.fault_adc1;
+    s.fault_adc2 = d->float_conf.fault_adc2;
 
     s.pitch = d->imu.pitch;
     s.balance_pitch = d->imu.balance_pitch;
@@ -125,4 +129,32 @@ const char *refloat_facade_footpad_name(int fs) {
     default:
         return "?";
     }
+}
+
+// Реализуется backend-ом платформы: вызов зарегистрированного Refloat set_cfg.
+bool floatcore_config_apply(uint8_t *data);
+
+float refloat_facade_config_test_value(void) {
+    if (!started) {
+        return -1.0f;
+    }
+    const Data *d = (const Data *) info.arg;
+    return d->float_conf.leds.status.brightness_headlights_off;
+}
+
+bool refloat_facade_config_save_test(float value) {
+    if (!started) {
+        return false;
+    }
+    Data *d = (Data *) info.arg;
+    d->float_conf.leds.status.brightness_headlights_off = value;
+
+    // Буфер с запасом: main.c рассчитывает на SERIALIZED_CONFIG_LENGTH = 320 Б.
+    static uint8_t buffer[512];
+    uint32_t written = confparser_serialize_refloatconfig(buffer, &d->float_conf);
+    if (written == 0 || written > sizeof(buffer)) {
+        return false;
+    }
+    // Дальше — путь самого Refloat: десериализация, применение и запись в eeprom.
+    return floatcore_config_apply(buffer);
 }

@@ -22,7 +22,7 @@ void mock_deinit(void);
  * Refloat присваивает `info->arg = d` в самом начале init() и сразу пользуется ARG,
  * поэтому mock обязан отдавать адрес того же поля.
  */
-void mock_set_arg_slot(void **slot);
+void floatcore_set_arg_slot(void **slot);
 
 /** Логирование VESC_IF->printf перенаправляется сюда. */
 void mock_set_log_sink(void (*sink)(const char *fmt, va_list ap));
