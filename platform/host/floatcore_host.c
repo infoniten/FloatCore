@@ -45,6 +45,11 @@ typedef struct {
     bool trace;
     bool mcconf_enabled;
     const char *mcconf_schema_version;
+
+    // Напряжения на выводах ADC1/ADC2, которые видит и Refloat, и страница
+    // RT App. Задаются флагом --adc, по умолчанию 0 В: педали не нажаты.
+    float adc1_volts;
+    float adc2_volts;
 } Host;
 
 static Host H;
@@ -168,6 +173,24 @@ static void mcconf_provider(void *ctx, VirtualMcConfValues *out) {
     out->l_temp_motor_end = fc_effective_temp_motor_end();
 }
 
+/**
+ * Входы RT App. Источник — те же напряжения на ADC1/ADC2, которые читает
+ * footpad_sensor.c Refloat: страница RT App показывает педали, а не выдумку.
+ *
+ * PPM и Nunchuk остаются нейтральными: приёмника и нунчака у FloatCore нет,
+ * а «нейтраль» здесь — это ноль, то есть отсутствие запроса тяги.
+ */
+static void decoded_inputs_provider(void *ctx, VescDecodedInputs *out) {
+    (void) ctx;
+    float adc1 = 0.0f, adc2 = 0.0f;
+    pthread_mutex_lock(&H.refloat_lock);
+    mock_adc_get(&adc1, &adc2);
+    pthread_mutex_unlock(&H.refloat_lock);
+
+    decoded_inputs_neutral(out);
+    decoded_inputs_from_adc(adc1, adc2, out);
+}
+
 static int qml_app_provider(void *ctx, const uint8_t **data) {
     (void) ctx;
     *data = qml_app_data;
@@ -199,6 +222,7 @@ static void *sim_thread(void *arg) {
 
         pthread_mutex_lock(&H.refloat_lock);
         mock_imu_set_raw(accel, gyro);
+        mock_adc_set(H.adc1_volts, H.adc2_volts);
         mock_motor_set_telemetry(&tele);
         mock_advance_us(IMU_PERIOD_US);
         mock_imu_tick((float) IMU_PERIOD_US * 1e-6f);
@@ -253,9 +277,11 @@ static void network_loop(void) {
         H.transport->disconnect(H.transport);
         log_line(
             "[host] сессия завершена: RX %u кадров, TX %u, CRC-ошибок %u, "
-            "неподдержанных команд %u, заблокированных моторных %u",
+            "неподдержанных команд %u, неизвестных команд %u, входов RT App %u, "
+            "заблокированных моторных %u",
             H.server.stats.rx_frames, H.server.stats.tx_frames, H.server.packet.stats.crc_errors,
-            H.server.stats.unsupported_commands, H.server.stats.motor_commands_blocked
+            H.server.stats.unsupported_commands, H.server.stats.unknown_commands,
+            H.server.stats.rt_inputs_sent, H.server.stats.motor_commands_blocked
         );
     }
 }
@@ -335,6 +361,8 @@ static void usage(const char *argv0) {
         "  --mcconf-schema <ver>  схема Motor Configuration (6.06 | 7.01)\n"
         "                   должна совпадать с версией вашего VESC Tool\n"
         "  --no-mcconf      не отдавать Virtual mcConfig\n"
+        "  --adc <v1,v2>    напряжения на ADC1/ADC2 в вольтах (педали),\n"
+        "                   по умолчанию 0,0 — педали не нажаты\n"
         "  --verbose        показывать лог Refloat\n"
         "  --help\n\n"
         "В VESC Tool: Connection → TCP → 127.0.0.1 : <порт> → Connect\n",
@@ -348,6 +376,7 @@ int main(int argc, char **argv) {
     uint16_t port = 65102;
     const char *eeprom_path = "build/floatcore_eeprom.bin";
     const char *limits_spec = NULL;
+    const char *adc_spec = NULL;
     bool verbose = false;
 
     H.mcconf_enabled = true;
@@ -363,6 +392,8 @@ int main(int argc, char **argv) {
             limits_spec = argv[++i];
         } else if (strcmp(argv[i], "--mcconf-schema") == 0 && i + 1 < argc) {
             H.mcconf_schema_version = argv[++i];
+        } else if (strcmp(argv[i], "--adc") == 0 && i + 1 < argc) {
+            adc_spec = argv[++i];
         } else if (strcmp(argv[i], "--no-mcconf") == 0) {
             H.mcconf_enabled = false;
         } else if (strcmp(argv[i], "--verbose") == 0) {
@@ -384,6 +415,10 @@ int main(int argc, char **argv) {
     floatcore_limits_init();
     if (limits_spec && !apply_limits_spec(limits_spec)) {
         fprintf(stderr, "[host] не разобран --limits: %s\n", limits_spec);
+        return 1;
+    }
+    if (adc_spec && sscanf(adc_spec, "%f,%f", &H.adc1_volts, &H.adc2_volts) != 2) {
+        fprintf(stderr, "[host] не разобран --adc: %s (ожидается v1,v2)\n", adc_spec);
         return 1;
     }
 
@@ -421,6 +456,7 @@ int main(int argc, char **argv) {
     H.server.telemetry_provider = telemetry_provider;
     H.server.qml_app_provider = qml_app_provider;
     H.server.custom_app.to_firmware = custom_app_to_firmware;
+    H.server.decoded_inputs_provider = decoded_inputs_provider;
 
     if (H.mcconf_enabled) {
         const McConfSchema *schema = H.mcconf_schema_version
@@ -471,6 +507,10 @@ int main(int argc, char **argv) {
     } else {
         log_line("[host] Virtual mcConfig отключён: Refloat UI возьмёт значения VESC Tool");
     }
+    log_line(
+        "[host] входы RT App: ADC1 %.2f В, ADC2 %.2f В, PPM и Nunchuk нейтральны",
+        H.adc1_volts, H.adc2_volts
+    );
     log_line("[host] вывод на моторы физически невозможен: backend — mock, CAN отсутствует");
 
     H.running = true;

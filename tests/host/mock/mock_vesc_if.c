@@ -836,6 +836,15 @@ void mock_adc_set(float a1, float a2) {
     M.adc[1] = a2;
 }
 
+void mock_adc_get(float *a1, float *a2) {
+    if (a1) {
+        *a1 = M.adc[0];
+    }
+    if (a2) {
+        *a2 = M.adc[1];
+    }
+}
+
 void mock_motor_set_telemetry(const MockMotorTelemetry *t) {
     M.tele = *t;
 }

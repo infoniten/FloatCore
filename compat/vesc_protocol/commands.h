@@ -31,6 +31,9 @@ typedef enum {
     COMM_PRINT = 21,
     COMM_REBOOT = 29,
     COMM_ALIVE = 30,
+    COMM_GET_DECODED_PPM = 31,
+    COMM_GET_DECODED_ADC = 32,
+    COMM_GET_DECODED_CHUK = 33,
     COMM_FORWARD_CAN = 34,
     COMM_CUSTOM_APP_DATA = 36,
     COMM_GET_VALUES_SELECTIVE = 50,
@@ -69,6 +72,7 @@ const char *vesc_command_name(uint8_t id);
 
 #include "config_bridge.h"
 #include "custom_app.h"
+#include "decoded_inputs.h"
 #include "firmware_info.h"
 #include "packet.h"
 #include "telemetry.h"
@@ -83,6 +87,7 @@ typedef struct {
     uint32_t empty_payloads;
     uint32_t truncated_payloads;     // payload короче, чем требуют аргументы команды
     uint32_t mcconf_sent;            // отдано Virtual mcConfig
+    uint32_t rt_inputs_sent;         // отдано отчётов о входах RT App (PPM/ADC/CHUK)
     uint32_t mcconf_writes_rejected; // попытки записать конфигурацию мотора
 } VescServerStats;
 
@@ -104,6 +109,15 @@ typedef struct {
      * по умолчанию из самого VESC Tool (поведение до версии 0.4.1).
      */
     void (*mcconf_provider)(void *ctx, VirtualMcConfValues *out);
+
+    /**
+     * Входы RT App (COMM_GET_DECODED_PPM/_ADC/_CHUK).
+     *
+     * NULL — отвечаем нейтральными значениями: страница RT App заполняется
+     * нулями, а не остаётся без ответа. Провайдер только читает состояние
+     * платформы; создать через него запрос к мотору невозможно.
+     */
+    void (*decoded_inputs_provider)(void *ctx, VescDecodedInputs *out);
 
     /** Схема Motor Configuration. NULL — используется самая новая известная. */
     const McConfSchema *mcconf_schema;

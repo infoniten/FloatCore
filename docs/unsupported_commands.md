@@ -46,6 +46,10 @@ RX  id=6   SET_CURRENT              len=5
 !!  id=6   SET_CURRENT              len=5  motor command BLOCKED (mock backend, no CAN output)
 ```
 
+`COMM_GET_DECODED_PPM` (31), `COMM_GET_DECODED_ADC` (32) и
+`COMM_GET_DECODED_CHUK` (33) с версии 0.4.2 **реализованы**: это read-only
+отчёт о входах для страницы RT App (см. `docs/rt_app_inputs.md`).
+
 `COMM_GET_MCCONF` (14) и `COMM_GET_MCCONF_DEFAULT` (15) с версии 0.4.1
 **реализованы** — они отдают Virtual mcConfig, read-only проекцию FloatCore
 Config (см. `docs/mcconfig_protocol.md`).
@@ -63,6 +67,7 @@ Config (см. `docs/mcconfig_protocol.md`).
 | `COMM_REBOOT` | 29 | Перезагрузка по запросу пока не нужна | — |
 | `COMM_FORWARD_CAN`, `COMM_CAN_FWD_FRAME` | 34, 85 | Проксирование CAN запрещено на этом этапе | Нельзя достучаться до FSESC через FloatCore |
 | `COMM_GET_IMU_DATA` | 65 | Страница IMU в VESC Tool; данные IMU и так видны в Refloat UI | Пустая страница IMU |
+| `COMM_SET_SERVO_POS` | 12 | Выхода на серво у FloatCore нет | — |
 | `COMM_GET_VALUES_SETUP` / `_SELECTIVE` | 47, 51 | Setup-значения относятся к группе ESC на CAN | Страница Setup RT пуста |
 | `COMM_GET_STATS`, `COMM_RESET_STATS` | 128, 129 | Статистика поездок ведётся Refloat | Пустая страница Statistics |
 | `COMM_LISP_*` | 130–139, 152 | LispBM в FloatCore отсутствует: Refloat — нативный код | Страница VESC Packages / Scripting не работает |
@@ -90,6 +95,10 @@ Config (см. `docs/mcconfig_protocol.md`).
 Счётчики сессии печатаются при разрыве соединения:
 
 ```
-[host] сессия завершена: RX 203 кадров, TX 202, CRC-ошибок 0,
-       неподдержанных команд 0, заблокированных моторных 0
+[host] сессия завершена: RX 281 кадров, TX 279, CRC-ошибок 0,
+       неподдержанных команд 0, неизвестных команд 0, входов RT App 64,
+       заблокированных моторных 1
 ```
+
+Интеграционный прогон проверяет эту строку: `неизвестных команд 0` — часть
+Definition of Done для RT App.

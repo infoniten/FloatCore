@@ -77,14 +77,15 @@ Refloat не защищает себя сам — это обязанность 
 | [docs/virtual_mcconfig.md](docs/virtual_mcconfig.md) | Полный аудит обращений Refloat QML к `mcConfig`, назначение и границы Virtual mcConfig |
 | [docs/mcconfig_mapping.md](docs/mcconfig_mapping.md) | FloatCore Config → Virtual mcConfig → QML: таблица отображения и обоснование правил агрегации двух ESC |
 | [docs/mcconfig_protocol.md](docs/mcconfig_protocol.md) | Обработчики протокола, сигнатура схемы, кодирование параметров, гарантия read-only |
+| [docs/rt_app_inputs.md](docs/rt_app_inputs.md) | Страница RT App: форматы `COMM_GET_DECODED_PPM/_ADC/_CHUK`, что отдаёт FloatCore и почему это безопасно |
 
 ## Сборка и тесты
 
 ```bash
 git submodule update --init
 make                # host-тесты, протокольные тесты, FloatCore Host
-make test           # протокольные тесты (102) + сценарии Refloat (11)
-make test-all       # то же + интеграционный прогон по настоящему сокету (36 проверок)
+make test           # протокольные тесты (120) + сценарии Refloat (11)
+make test-all       # то же + интеграционный прогон по настоящему сокету (43 проверки)
 ```
 
 Либо в контейнере: `docker build -t refloat-host . && docker run --rm refloat-host`.

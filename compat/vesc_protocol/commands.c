@@ -40,6 +40,12 @@ const char *vesc_command_name(uint8_t id) {
         return "REBOOT";
     case COMM_ALIVE:
         return "ALIVE";
+    case COMM_GET_DECODED_PPM:
+        return "GET_DECODED_PPM";
+    case COMM_GET_DECODED_ADC:
+        return "GET_DECODED_ADC";
+    case COMM_GET_DECODED_CHUK:
+        return "GET_DECODED_CHUK";
     case COMM_FORWARD_CAN:
         return "FORWARD_CAN";
     case COMM_CUSTOM_APP_DATA:
@@ -187,6 +193,34 @@ static void handle_payload(void *ctx, const uint8_t *payload, size_t len) {
     case COMM_ALIVE:
         // Прошивка VESC на COMM_ALIVE не отвечает, только сбрасывает таймаут.
         return;
+
+    case COMM_GET_DECODED_PPM:
+    case COMM_GET_DECODED_ADC:
+    case COMM_GET_DECODED_CHUK: {
+        // Страница RT App в VESC Tool. Путь только на чтение: провайдер
+        // сообщает состояние входов, обработчик его кодирует. Ни конфигурация,
+        // ни состояние Refloat, ни мотор здесь не затрагиваются.
+        VescDecodedInputs in;
+        decoded_inputs_neutral(&in);
+        if (s->decoded_inputs_provider) {
+            s->decoded_inputs_provider(s->ctx, &in);
+        }
+
+        size_t n = 0;
+        if (cmd == COMM_GET_DECODED_PPM) {
+            n = decoded_ppm_encode(&in, s->scratch, sizeof(s->scratch));
+        } else if (cmd == COMM_GET_DECODED_ADC) {
+            n = decoded_adc_encode(&in, s->scratch, sizeof(s->scratch));
+        } else {
+            n = decoded_chuk_encode(&in, s->scratch, sizeof(s->scratch));
+        }
+        if (n == 0) {
+            return;
+        }
+        ++s->stats.rt_inputs_sent;
+        reply(s, n);
+        return;
+    }
 
     case COMM_GET_VALUES:
     case COMM_GET_VALUES_SELECTIVE: {

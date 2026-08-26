@@ -1039,6 +1039,127 @@ static void test_mcconf_push_on_connect(void) {
     check(ok && (int) cells == 10, "в нём проекция FloatCore: ячеек = %d", (int) cells);
 }
 
+// ------------------------------------------------------- входы RT App (31/32/33)
+
+/** int32 big-endian из ответа. */
+static int32_t be32(const uint8_t *p) {
+    return (int32_t) (((uint32_t) p[0] << 24) | ((uint32_t) p[1] << 16) | ((uint32_t) p[2] << 8) |
+                      (uint32_t) p[3]);
+}
+
+/** Ровно то же преобразование, что делает прошивка VESC. */
+static int32_t fw_scaled(double v) {
+    return (int32_t) (v * 1000000.0);
+}
+
+static VescDecodedInputs stub_inputs;
+static int stub_inputs_calls;
+
+static void stub_decoded_inputs(void *ctx, VescDecodedInputs *out) {
+    (void) ctx;
+    ++stub_inputs_calls;
+    *out = stub_inputs;
+}
+
+static void test_decoded_inputs(void) {
+    section("RT App: COMM_GET_DECODED_PPM / _ADC / _CHUK");
+
+    // --- без провайдера: нейтраль, но ответ есть
+    VescServer s;
+    server_setup(&s);
+    uint8_t rep[64];
+
+    uint8_t req = COMM_GET_DECODED_PPM;
+    size_t n = server_request(&s, &req, 1, rep, sizeof(rep));
+    check(n == DECODED_PPM_REPLY_LEN && rep[0] == COMM_GET_DECODED_PPM,
+          "PPM без провайдера: ответ %zu байт, id=%u", n, rep[0]);
+    check(be32(rep + 1) == 0 && be32(rep + 5) == 0, "PPM без провайдера нейтрален: 0, 0");
+
+    req = COMM_GET_DECODED_CHUK;
+    n = server_request(&s, &req, 1, rep, sizeof(rep));
+    check(n == DECODED_CHUK_REPLY_LEN && be32(rep + 1) == 0,
+          "CHUK без провайдера: %zu байт, значение 0 (эквивалент «не подключён»)", n);
+
+    // --- с провайдером: педали
+    server_setup(&s);
+    s.decoded_inputs_provider = stub_decoded_inputs;
+    stub_inputs_calls = 0;
+    decoded_inputs_neutral(&stub_inputs);
+    decoded_inputs_from_adc(1.65f, 2.20f, &stub_inputs);
+
+    req = COMM_GET_DECODED_ADC;
+    n = server_request(&s, &req, 1, rep, sizeof(rep));
+    check(n == DECODED_ADC_REPLY_LEN && rep[0] == COMM_GET_DECODED_ADC,
+          "ADC: ответ %zu байт (1 + 4 int32), id=%u", n, rep[0]);
+    check(be32(rep + 5) == fw_scaled(1.65f) && be32(rep + 13) == fw_scaled(2.20f),
+          "напряжения переданы как есть: %.6f и %.6f В", be32(rep + 5) / 1e6,
+          be32(rep + 13) / 1e6);
+    check(be32(rep + 1) == fw_scaled(1.65f / DECODED_ADC_FULL_SCALE_V) &&
+              be32(rep + 9) == fw_scaled(2.20f / DECODED_ADC_FULL_SCALE_V),
+          "level — доля полной шкалы 3.3 В: %.4f и %.4f", be32(rep + 1) / 1e6,
+          be32(rep + 9) / 1e6);
+    check(stub_inputs_calls == 1, "провайдер опрошен ровно один раз (%d)", stub_inputs_calls);
+
+    // Порядок полей задан прошивкой: level, voltage, level2, voltage2.
+    // Если бы каналы шли парами (level, level2, voltage, voltage2), эта
+    // проверка провалилась бы: 0.5 никогда не равно 1.65.
+    check(be32(rep + 1) < be32(rep + 5), "порядок полей: level перед voltage");
+
+    // --- педаль вне диапазона: level ограничен единицей, напряжение — нет
+    decoded_inputs_from_adc(5.0f, -1.0f, &stub_inputs);
+    n = server_request(&s, &req, 1, rep, sizeof(rep));
+    check(be32(rep + 1) == fw_scaled(1.0), "перенапряжение на ADC1: level = 1.0, не больше");
+    check(be32(rep + 9) == 0 && be32(rep + 13) == 0,
+          "io_read_analog() = −1 (вывода нет) → канал 2 нулевой, а не отрицательный");
+
+    // --- усечение, а не округление: прошивка делает (int32_t)(v * 1000000.0)
+    decoded_inputs_neutral(&stub_inputs);
+    stub_inputs.ppm_pulse_len = 1.0000007f;
+    req = COMM_GET_DECODED_PPM;
+    n = server_request(&s, &req, 1, rep, sizeof(rep));
+    check(be32(rep + 5) == 1000000,
+          "дробная часть отбрасывается, как в прошивке: %d (округление дало бы 1000001)",
+          be32(rep + 5));
+
+    // --- нефинитные значения наружу не уходят
+    stub_inputs.ppm_level = NAN;
+    stub_inputs.ppm_pulse_len = INFINITY;
+    n = server_request(&s, &req, 1, rep, sizeof(rep));
+    check(n == DECODED_PPM_REPLY_LEN && be32(rep + 1) == 0 && be32(rep + 5) == 0,
+          "NaN и inf заменяются нулём");
+
+    // --- безопасность: ни одна из трёх команд ничего не меняет
+    server_setup(&s);
+    s.decoded_inputs_provider = stub_decoded_inputs;
+    decoded_inputs_neutral(&stub_inputs);
+    stub_set_called = false;
+    for (int i = 0; i < 20; ++i) {
+        uint8_t c = (uint8_t) (COMM_GET_DECODED_PPM + (i % 3));
+        server_request(&s, &c, 1, rep, sizeof(rep));
+    }
+    check(s.stats.rt_inputs_sent == 20, "отдано 20 отчётов (%u)", s.stats.rt_inputs_sent);
+    check(s.stats.unknown_commands == 0 && s.stats.unsupported_commands == 0,
+          "31/32/33 больше не считаются неизвестными или нереализованными");
+    check(s.stats.motor_commands_blocked == 0 && !stub_set_called,
+          "ни одной попытки управления мотором и ни одной записи конфигурации");
+    check(s.stats.mcconf_writes_rejected == 0 && s.stats.mcconf_sent == 0,
+          "конфигурация мотора не затронута");
+
+    // --- лишние байты в запросе игнорируются, ответ тот же
+    uint8_t noisy[8] = {COMM_GET_DECODED_CHUK, 0xDE, 0xAD, 0xBE, 0xEF, 1, 2, 3};
+    n = server_request(&s, noisy, sizeof(noisy), rep, sizeof(rep));
+    check(n == DECODED_CHUK_REPLY_LEN, "лишние байты запроса не мешают (%zu)", n);
+
+    // --- нехватка места в буфере: кодировщик молчит, а не портит память
+    uint8_t tiny[4];
+    VescDecodedInputs in;
+    decoded_inputs_neutral(&in);
+    check(decoded_ppm_encode(&in, tiny, sizeof(tiny)) == 0 &&
+              decoded_adc_encode(&in, tiny, sizeof(tiny)) == 0 &&
+              decoded_chuk_encode(&in, tiny, sizeof(tiny)) == 0,
+          "при нехватке места кодировщики возвращают 0");
+}
+
 int main(void) {
     printf("\nFloatCore protocol tests — только compat/vesc_protocol, без платформы\n");
     printf("================================================================\n");
@@ -1061,6 +1182,7 @@ int main(void) {
     test_mcconf_aggregation();
     test_mcconf_readonly();
     test_mcconf_push_on_connect();
+    test_decoded_inputs();
 
     printf("\n================================================================\n");
     if (failures == 0) {

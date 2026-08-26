@@ -41,6 +41,9 @@
 | `COMM_GET_VALUES` | 4 | Tool → FC, ответ | для телеметрии | Realtime-страница | `telemetry.c`, источник — `LogicalMotorTelemetry` |
 | `COMM_GET_VALUES_SELECTIVE` | 50 | Tool → FC, ответ | опц. | То же с маской полей | `telemetry.c`, та же кодировка + маска |
 | `COMM_ALIVE` | 30 | Tool → FC | **да** | Keep-alive. Прошивка на него не отвечает | Принимается, ответа нет — как в прошивке |
+| `COMM_GET_DECODED_PPM` | 31 | Tool → FC, ответ | для RT App | Страница RT App опрашивает её периодически | `decoded_inputs.c`, нейтраль: приёмника нет |
+| `COMM_GET_DECODED_ADC` | 32 | Tool → FC, ответ | для RT App | То же | `decoded_inputs.c`, напряжения на выводах ADC1/ADC2 педалей |
+| `COMM_GET_DECODED_CHUK` | 33 | Tool → FC, ответ | для RT App | То же | `decoded_inputs.c`, нейтраль: нунчака нет |
 | `COMM_CUSTOM_APP_DATA` | 36 | обе стороны | **да** | Канал QML ↔ Refloat | `custom_app.c` — чистый транспорт, содержимое не разбирается |
 | `COMM_GET_CUSTOM_CONFIG_XML` | 92 | Tool → FC, ответ | **да** | Схема параметров (сжатый `settings.xml`) чанками | `config_bridge.c` + `get_cfg_xml` Refloat |
 | `COMM_GET_CUSTOM_CONFIG` | 93 | Tool → FC, ответ | **да** | Текущая конфигурация | `config_bridge.c` + `get_cfg` Refloat |
@@ -82,6 +85,10 @@ VESC Tool и включает всё, что нам нужно.
 предлагает обновлять прошивку ESC. CUSTOM_MODULE снимает эти ожидания и при этом
 **не мешает** ни custom config, ни QML — они не зависят от типа железа.
 
+**Входы RT App** (31/32/33) — по одному формату: `int32` big-endian со шкалой
+1e6, усечение как в прошивке. Полный разбор, значения и границы безопасности —
+[rt_app_inputs.md](rt_app_inputs.md).
+
 **Чанковый обмен** (XML схемы и QML) одинаков по смыслу:
 
 ```
@@ -107,7 +114,8 @@ big-endian с размером несжатых данных, затем пот�
 4. Если `qml_app` > 0 → чанками `COMM_GET_QML_UI_APP`, затем `qmlLoadDone()`.
 5. Для каждой конфигурации `COMM_GET_CUSTOM_CONFIG` → `customConfigLoadDone()`.
 6. Далее по потребности: `COMM_GET_VALUES` на realtime-странице, `COMM_ALIVE`
-   как keep-alive, `COMM_CUSTOM_APP_DATA` от QML Refloat.
+   как keep-alive, `COMM_CUSTOM_APP_DATA` от QML Refloat, а на открытой странице
+   RT App — периодические `COMM_GET_DECODED_PPM`/`_ADC`/`_CHUK`.
 
 Пункты 2 и 4 кэшируются VESC Tool по UUID устройства. Поэтому UUID должен быть
 стабильным между запусками — иначе кэш будет расти, а при изменении QML
@@ -115,10 +123,10 @@ big-endian с размером несжатых данных, затем пот�
 
 ## 4. Проверено
 
-`tests/protocol/test_protocol.c` (71 проверка) — кадрирование, CRC, кодировки
+`tests/protocol/test_protocol.c` (120 проверок) — кадрирование, CRC, кодировки
 ответов, негативные случаи. Линкуется только с `compat/vesc_protocol`.
 
-`tests/host_integration/vesc_tool_sim.py` (25 проверок) — полный сценарий
+`tests/host_integration/vesc_tool_sim.py` (43 проверки) — полный сценарий
 Definition of Done на настоящем сокете: подключение, идентификация, телеметрия,
 загрузка QML, чтение схемы и конфигурации, запись параметра, переподключение,
-перезапуск процесса, блокировка команд мотору.
+перезапуск процесса, входы RT App, блокировка команд мотору.

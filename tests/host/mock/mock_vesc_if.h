@@ -65,6 +65,9 @@ bool mock_imu_is_stalled(void);
 
 void mock_adc_set(float adc1_volts, float adc2_volts);
 
+/** Текущие напряжения на выводах ADC1/ADC2 — то же, что видит Refloat. */
+void mock_adc_get(float *adc1_volts, float *adc2_volts);
+
 // ------------------------------------------------------------------ телеметрия
 
 typedef struct {

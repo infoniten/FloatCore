@@ -22,6 +22,9 @@ COMM_FW_VERSION = 0
 COMM_GET_VALUES = 4
 COMM_SET_CURRENT = 6
 COMM_ALIVE = 30
+COMM_GET_DECODED_PPM = 31
+COMM_GET_DECODED_ADC = 32
+COMM_GET_DECODED_CHUK = 33
 COMM_CUSTOM_APP_DATA = 36
 COMM_GET_CUSTOM_CONFIG_XML = 92
 COMM_GET_CUSTOM_CONFIG = 93
@@ -177,6 +180,14 @@ def parse_values(p: bytes):
                 amp_hours_charged=i32() / 1e4, watt_hours=i32() / 1e4,
                 watt_hours_charged=i32() / 1e4, tachometer=i32(), tachometer_abs=i32(),
                 fault=p[i])
+
+
+def parse_decoded(p: bytes, expect_id: int, count: int):
+    """Ответы RT App: [id] + count * int32 со шкалой 1e6 (bldc/comm/commands.c)."""
+    assert p[0] == expect_id, f"id {p[0]} != {expect_id}"
+    if len(p) != 1 + 4 * count:
+        raise ValueError(f"длина {len(p)}, ожидалось {1 + 4 * count}")
+    return [struct.unpack(">i", p[1 + 4 * i:5 + 4 * i])[0] / 1e6 for i in range(count)]
 
 
 def fetch_chunked(link, cmd, conf_ind=None):
@@ -361,6 +372,46 @@ def main():
          f"t_fet={vals['temp_mos']} °C, fault={vals['fault']}")
     check(vals["fault"] == 0, "код фолта = 0")
     check(isinstance(vals["rpm"], int), "телеметрия декодируется в ожидаемом формате")
+
+    # ---------------------------------------------------------------- RT App
+    section("RT App: декодированные входы (31/32/33)")
+    # Фикстура run.sh: --adc 1.65,1.20 — напряжения на выводах ADC1/ADC2,
+    # те же, что читает footpad_sensor.c Refloat.
+    ADC1, ADC2 = 1.65, 1.20
+    FULL_SCALE = 3.3
+
+    ppm = parse_decoded(link.request(bytes([COMM_GET_DECODED_PPM]), COMM_GET_DECODED_PPM),
+                        COMM_GET_DECODED_PPM, 2)
+    info(f"PPM: level={ppm[0]}, длительность импульса={ppm[1]} с")
+    check(ppm == [0.0, 0.0], "PPM нейтрален: приёмника нет, запроса тяги нет")
+
+    adc = parse_decoded(link.request(bytes([COMM_GET_DECODED_ADC]), COMM_GET_DECODED_ADC),
+                        COMM_GET_DECODED_ADC, 4)
+    info(f"ADC: level={adc[0]:.4f} при {adc[1]:.3f} В, level2={adc[2]:.4f} при {adc[3]:.3f} В")
+    check(abs(adc[1] - ADC1) < 1e-3 and abs(adc[3] - ADC2) < 1e-3,
+          "напряжения каналов — это выводы ADC1/ADC2 педалей")
+    check(abs(adc[0] - ADC1 / FULL_SCALE) < 1e-3 and abs(adc[2] - ADC2 / FULL_SCALE) < 1e-3,
+          "level — доля полной шкалы 3.3 В")
+
+    chuk = parse_decoded(link.request(bytes([COMM_GET_DECODED_CHUK]), COMM_GET_DECODED_CHUK),
+                         COMM_GET_DECODED_CHUK, 1)
+    check(chuk == [0.0], "Nunchuk нейтрален (эквивалент «не подключён»)")
+
+    # RT App опрашивает эти команды непрерывно — так и проверяем
+    before = parse_values(link.request(bytes([COMM_GET_VALUES]), COMM_GET_VALUES))
+    for _ in range(20):
+        link.request(bytes([COMM_GET_DECODED_PPM]), COMM_GET_DECODED_PPM)
+        link.request(bytes([COMM_GET_DECODED_ADC]), COMM_GET_DECODED_ADC)
+        link.request(bytes([COMM_GET_DECODED_CHUK]), COMM_GET_DECODED_CHUK)
+    after = parse_values(link.request(bytes([COMM_GET_VALUES]), COMM_GET_VALUES))
+    check(after["current_motor"] == 0.0 and after["duty"] == 0.0 and after["rpm"] == 0,
+          f"после 60 опросов мотор не тронут: ток {after['current_motor']} А, "
+          f"duty {after['duty']}, rpm {after['rpm']}")
+    check(before["current_motor"] == after["current_motor"], "телеметрия мотора не изменилась")
+
+    adc2 = parse_decoded(link.request(bytes([COMM_GET_DECODED_ADC]), COMM_GET_DECODED_ADC),
+                         COMM_GET_DECODED_ADC, 4)
+    check(adc2 == adc, "значения детерминированы: повторный опрос даёт те же байты")
 
     # ---------------------------------------------------------------- 6. QML
     section("6. Загрузка Refloat UI")
