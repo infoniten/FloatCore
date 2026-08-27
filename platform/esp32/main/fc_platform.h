@@ -24,6 +24,7 @@
 #define FC_PRIO_REFLOAT 12    // refloat_thd, 500 Гц
 #define FC_PRIO_SUPERVISOR 15 // выше контура: обязан отработать при перегрузке
 #define FC_PRIO_CONSOLE 4     // read-only CLI, ядро 0
+#define FC_PRIO_IMU_STRESS 5  // стресс-тест шины I2C, ядро 0 (см. fc_imu_stress.c)
 
 // Refloat просит 1536 байт стека — этого мало для Xtensa (docs/vesc_if_contract.md §2).
 #define FC_STACK_SCALE 8
@@ -153,10 +154,22 @@ void fc_print_safety_line(void);
 bool fc_imu_real_start(void);
 void fc_imu_real_stop(void);
 bool fc_imu_real_available(void);
+bool fc_imu_real_running(void);
 uint64_t fc_imu_real_iterations(void);
 uint32_t fc_imu_real_max_read_us(void);
 uint32_t fc_imu_real_stack_watermark(void);
 uint64_t fc_uptime_us(void);
+
+// ------------------------------------------- стресс-тест шины I2C (v0.6C)
+// Диагностика железа: читает ICM-20948 без пауз, замещая штатную задачу.
+// К Refloat и к выходу на мотор отношения не имеет — см. fc_imu_stress.c.
+// i2c_hz == 0 — оставить штатную частоту шины (400 кГц).
+#define FC_STRESS_DEFAULT_RESET_THRESHOLD 3
+// reset_threshold — сколько отказов подряд до сброса шины; 0 — не сбрасывать.
+bool fc_imu_stress_start(uint32_t seconds, uint32_t i2c_hz, uint32_t reset_threshold);
+void fc_imu_stress_stop(void);
+bool fc_imu_stress_running(void);
+void fc_imu_stress_print_log(void);
 
 // ------------------------------------------- интроспекция для консоли (§15)
 size_t fc_thread_count(void);

@@ -35,6 +35,7 @@
 #include <inttypes.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -93,6 +94,11 @@ static void cmd_imu(void) {
     FcImuHealthStatus h = fc_imu_health_status();
 
     printf("драйвер           %s\n", fc_imu_real_available() ? "ICM-20948 работает" : "не поднят");
+    if (!fc_imu_real_available()) {
+        printf("последний шаг     %s\n", icm20948_last_stage());
+    }
+    printf("инициализация     повторов записи %" PRIu32 ", ожидание после сброса %" PRIu32 " мс\n",
+           icm20948_init_retries(), icm20948_reset_wait_us() / 1000);
     printf("шина              SDA=GPIO%d SCL=GPIO%d, %" PRIu32 " Гц, адрес 0x%02x\n",
            cfg->sda_gpio, cfg->scl_gpio, cfg->i2c_hz, cfg->i2c_addr);
     printf("шкалы             accel ±%.0f g (%.0f LSB/g), gyro ±%.0f °/с (%.1f LSB/(°/с))\n",
@@ -123,6 +129,57 @@ static void cmd_imu(void) {
     printf("оси               СЫРЫЕ, в системе координат датчика. Привязка к доске отложена\n");
     printf("                  до финального монтажа (docs/esp32_architecture.md, v0.6B)\n");
     printf("в Refloat         НЕ передаются: контур работает от mock (ТЗ v0.6A §29)\n");
+}
+
+// Скан шины I2C. SAFE_READONLY, но формулировка требует точности: команда
+// опрашивает адреса и читает WHO_AM_I, а чтобы прочитать его, выбирает нулевой
+// банк записью в BANK_SEL. Это переключение окна регистров, а не изменение
+// конфигурации: тот же select_bank драйвер делает при каждом обычном чтении, и
+// кэш банка после опроса инвалидируется. Ни один параметр датчика команда не
+// меняет и к мотору отношения не имеет. Если шина ещё не поднята (датчик не
+// инициализировался), команда поднимает её — именно для этого случая она и
+// нужна.
+static void cmd_i2cscan(void) {
+    if (fc_imu_real_running()) {
+        printf("i2cscan: штатная задача чтения активна — у драйвера один читатель.\n");
+        printf("  остановите её: imu-stop-confirm, затем повторите скан\n");
+        return;
+    }
+    icm20948_config_t cfg = icm20948_default_config();
+    uint8_t found[16];
+    size_t n = 0;
+    esp_err_t err = icm20948_scan(&cfg, found, sizeof(found), &n);
+    if (err != ESP_OK) {
+        printf("i2cscan: шина не поднялась: %s\n", esp_err_to_name(err));
+        printf("  это уже не про датчик: проверьте GPIO%d/GPIO%d и питание\n", cfg.sda_gpio,
+               cfg.scl_gpio);
+        return;
+    }
+    printf("i2cscan: SDA=GPIO%d SCL=GPIO%d, %" PRIu32 " Гц, диапазон 0x08…0x77\n", cfg.sda_gpio,
+           cfg.scl_gpio, cfg.i2c_hz);
+    if (!n) {
+        printf("  НИ ОДНОГО устройства не ответило\n");
+        printf("  вероятные причины: нет питания на модуле, перепутаны SDA/SCL,\n");
+        printf("  обрыв в жгуте, отсутствуют подтяжки на линиях\n");
+        return;
+    }
+    printf("  ответили: %u\n", (unsigned) n);
+    for (size_t i = 0; i < n; ++i) {
+        uint8_t who = 0;
+        esp_err_t we = icm20948_probe_addr(&cfg, found[i], &who);
+        const char *verdict = "неизвестное устройство";
+        if (we != ESP_OK) {
+            verdict = "WHO_AM_I не прочитался";
+        } else if (who == ICM20948_WHO_AM_I_VALUE) {
+            verdict = "ICM-20948 (WHO_AM_I совпал)";
+        }
+        printf("    0x%02x  WHO_AM_I=0x%02x  %s\n", found[i], who, verdict);
+        if (we == ESP_OK && who == ICM20948_WHO_AM_I_VALUE && found[i] != cfg.i2c_addr) {
+            printf("      ВНИМАНИЕ: драйвер настроен на 0x%02x. Датчик на 0x%02x означает,\n",
+                   cfg.i2c_addr, found[i]);
+            printf("      что вывод AD0 подтянут к питанию, а не к земле\n");
+        }
+    }
 }
 
 static void cmd_tasks(void) {
@@ -341,6 +398,67 @@ static void cmd_imu_start(void) {
     printf("imu-start: %s\n", ok ? "задача чтения запущена" : "датчик не отвечает");
 }
 
+// Стресс-тест шины I2C (ТЗ v0.6C). Категория STATE_CHANGING: замещает
+// штатную задачу чтения датчика, но физически безопасен — путей к мотору в
+// нём нет, а Refloat всё это время работает от mock-IMU.
+static void cmd_imu_stress(const char *arg) {
+    uint32_t seconds = 150;  // > 2 минут по ТЗ, с запасом на разгон
+    uint32_t khz = 0;        // 0 — штатные 400 кГц
+    uint32_t threshold = FC_STRESS_DEFAULT_RESET_THRESHOLD;
+    if (arg && *arg) {
+        char *end = NULL;
+        long v = strtol(arg, &end, 10);
+        if (v >= 5 && v <= 3600) {
+            seconds = (uint32_t) v;
+        } else {
+            printf("imu_stress: длительность вне диапазона 5…3600 s, беру %" PRIu32 "\n", seconds);
+        }
+        if (end) {
+            char *end2 = NULL;
+            long k = strtol(end, &end2, 10);
+            if (k >= 10 && k <= 400) {
+                khz = (uint32_t) k;
+            } else if (k != 0) {
+                printf("imu_stress: частота вне диапазона 10…400 кГц, беру штатную\n");
+            }
+            if (end2 && *end2) {
+                long r = strtol(end2, NULL, 10);
+                if (r >= 0 && r <= 100000) {
+                    threshold = (uint32_t) r;
+                }
+            }
+        }
+    }
+    if (fc_imu_stress_running()) {
+        printf("imu_stress: тест уже идёт, остановить — imu_stress-stop\n");
+        return;
+    }
+    printf("imu_stress: запуск на %" PRIu32 " s. Воздействуйте на жгут не менее двух минут.\n",
+           seconds);
+    printf("  досрочная остановка: imu_stress-stop\n");
+    printf("  предыстория первого отказа: imu_stress-log\n");
+    if (khz) {
+        printf("  частота шины на время теста: %" PRIu32 " кГц (штатная 400)\n", khz);
+    }
+    if (threshold) {
+        printf("  сброс шины после %" PRIu32 " отказов подряд\n", threshold);
+    } else {
+        printf("  сброс шины ОТКЛЮЧЁН (диагностика: восстановится ли шина сама)\n");
+    }
+    if (!fc_imu_stress_start(seconds, khz * 1000, threshold)) {
+        printf("imu_stress: НЕ ЗАПУЩЕН (датчик не поднят или штатная задача не остановилась)\n");
+    }
+}
+
+static void cmd_imu_stress_stop(void) {
+    if (!fc_imu_stress_running()) {
+        printf("imu_stress: тест не запущен\n");
+        return;
+    }
+    fc_imu_stress_stop();
+    printf("imu_stress: остановка запрошена, итоговый отчёт напечатает сама задача\n");
+}
+
 static void cmd_imu_fail(void) {
     printf("imu-fail: следующие 500 чтений ICM-20948 завершатся ошибкой\n");
     printf("  ожидается: health READ_ERROR -> supervisor FAULT (IMU_UNHEALTHY)\n");
@@ -356,13 +474,15 @@ static void cmd_imu_freeze(void) {
 #endif  // FC_LAB_DIAGNOSTICS
 
 static void cmd_help(void) {
-    printf("диагностика (read-only): status | supervisor | imu | timing | timing-hist | tasks |\n");
-    printf("                         heap | config | safety | help\n");
+    printf("диагностика (read-only): status | supervisor | imu | i2cscan | timing | timing-hist |\n");
+    printf("                         tasks | heap | config | safety | help\n");
 #if FC_LAB_DIAGNOSTICS
     printf("меняют состояние:        ready | disarm | fault-clear | persist | timing-reset |\n");
     printf("                         restart\n");
     printf("проверка защит:          wdtest-confirm | crashtest-confirm | imu-fail-confirm |\n");
     printf("                         imu-freeze-confirm | imu-stop-confirm | imu-start\n");
+    printf("стресс-тест шины I2C:    imu_stress [сек] [кГц] [порог_сброса] | imu_stress-stop |\n");
+    printf("                         imu_stress-log\n");
 #endif
     printf("профиль сборки:          %s\n", FC_PROFILE_NAME);
     printf("команд управления мотором нет: в этой сборке нет кода, способного что-либо\n");
@@ -378,6 +498,8 @@ static void dispatch(const char *line) {
         cmd_imu();
     } else if (!strcmp(line, "tasks")) {
         cmd_tasks();
+    } else if (!strcmp(line, "i2cscan")) {
+        cmd_i2cscan();
     } else if (!strcmp(line, "timing")) {
         cmd_timing();
     } else if (!strcmp(line, "timing-hist")) {
@@ -413,6 +535,13 @@ static void dispatch(const char *line) {
         cmd_imu_fail();
     } else if (!strcmp(line, "imu-freeze-confirm")) {
         cmd_imu_freeze();
+    } else if (!strcmp(line, "imu_stress-stop")) {
+        cmd_imu_stress_stop();
+    } else if (!strcmp(line, "imu_stress-log")) {
+        fc_imu_stress_print_log();
+    } else if (!strncmp(line, "imu_stress", 10) &&
+               (line[10] == 0 || line[10] == ' ')) {
+        cmd_imu_stress(line[10] == ' ' ? line + 11 : NULL);
 #endif
     } else {
         cmd_help();

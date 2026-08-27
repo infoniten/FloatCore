@@ -65,6 +65,14 @@ bool fc_imu_real_last_sample(icm20948_sample_t *out) {
     return true;
 }
 
+// Флаг «задача действительно жива», а не «её просили жить»: fc_imu_real_stop()
+// лишь снимает run, а завершается задача на следующей итерации. Стресс-тест
+// (fc_imu_stress.c) обязан дождаться именно фактического ухода, иначе на шине
+// окажутся два читателя без мьютекса.
+bool fc_imu_real_running(void) {
+    return R.task != NULL;
+}
+
 uint64_t fc_imu_real_iterations(void) {
     return R.task_iterations;
 }
@@ -135,8 +143,11 @@ bool fc_imu_real_start(void) {
 
     uint8_t who = 0;
     icm20948_who_am_i(&who);
+    // Адрес берётся из активной конфигурации, а не из запрошенной: драйвер мог
+    // разрешить его опросом (AD0 подтянут к питанию — тогда 0x69, а не 0x68).
     ESP_LOGI(TAG, "ICM-20948 на 0x%02x, WHO_AM_I = 0x%02x, шкалы ±%.0f g / ±%.0f °/с, ODR %.1f Гц",
-             cfg.i2c_addr, who, (double) icm20948_accel_fs_g(cfg.accel_fs),
+             icm20948_active_config()->i2c_addr, who,
+             (double) icm20948_accel_fs_g(cfg.accel_fs),
              (double) icm20948_gyro_fs_dps(cfg.gyro_fs), (double) icm20948_odr_hz(cfg.smplrt_div));
 
     FcImuHealthConfig hc = fc_imu_health_config_for(icm20948_accel_fs_g(cfg.accel_fs),

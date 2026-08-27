@@ -8,11 +8,13 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include <inttypes.h>
 #include <string.h>
 
 // --- USER BANK 0 (DS-000189 §7.1) -------------------------------------------
@@ -37,6 +39,22 @@
 #define PWR_MGMT_1_SLEEP 0x40
 #define PWR_MGMT_1_CLKSEL_AUTO 0x01
 
+static const char *TAG = "icm20948";
+
+// Имя последнего выполненного шага инициализации. Без него отказ виден только
+// как код ошибки на всю последовательность из десяти записей, и непонятно,
+// шина это, датчик или конкретный регистр.
+static const char *g_stage = "не начиналась";
+
+// Счётчик повторов на этапе инициализации.
+//
+// Повтор здесь допустим, а замалчивание — нет. Один-два повтора после
+// аппаратного сброса — нормальная реакция на разброс времени готовности;
+// десятки повторов означают маргинальную шину или питание, и это обязано
+// быть видно в диагностике, а не растворяться в «датчик поднялся».
+static uint32_t g_init_retries;
+
+
 static struct {
     i2c_master_bus_handle_t bus;
     i2c_master_dev_handle_t dev;
@@ -48,6 +66,7 @@ static struct {
     int inject_frozen;
     icm20948_sample_t last;
     bool have_last;
+    uint32_t reset_wait_us;  // сколько ждали ответа после DEVICE_RESET
 } D;
 
 icm20948_config_t icm20948_default_config(void) {
@@ -135,6 +154,18 @@ float icm20948_odr_hz(uint8_t smplrt_div) {
     return 1125.0f / (1.0f + (float) smplrt_div);
 }
 
+const char *icm20948_last_stage(void) {
+    return g_stage;
+}
+
+uint32_t icm20948_init_retries(void) {
+    return g_init_retries;
+}
+
+uint32_t icm20948_reset_wait_us(void) {
+    return D.reset_wait_us;
+}
+
 const icm20948_config_t *icm20948_active_config(void) {
     return &D.cfg;
 }
@@ -144,6 +175,23 @@ const icm20948_config_t *icm20948_active_config(void) {
 static esp_err_t reg_write(uint8_t reg, uint8_t value) {
     uint8_t tx[2] = {reg, value};
     return i2c_master_transmit(D.dev, tx, sizeof(tx), 100);
+}
+
+static esp_err_t reg_write_retry(uint8_t reg, uint8_t value) {
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < 20; ++i) {
+        err = reg_write(reg, value);
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+        ++g_init_retries;
+        // Состояние банка после неудачной записи неизвестно только если
+        // неудачной была запись самого BANK_SEL; на всякий случай сбрасываем
+        // кэш, чтобы следующий select_bank выполнился реально.
+        D.current_bank = 0xFF;
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return err;
 }
 
 static esp_err_t reg_read(uint8_t reg, uint8_t *buf, size_t len) {
@@ -156,6 +204,17 @@ static esp_err_t select_bank(uint8_t bank) {
         return ESP_OK;
     }
     esp_err_t err = reg_write(REG_BANK_SEL, (uint8_t) (bank << 4));
+    if (err == ESP_OK) {
+        D.current_bank = bank;
+    }
+    return err;
+}
+
+static esp_err_t select_bank_retry(uint8_t bank) {
+    if (D.current_bank == bank) {
+        return ESP_OK;
+    }
+    esp_err_t err = reg_write_retry(REG_BANK_SEL, (uint8_t) (bank << 4));
     if (err == ESP_OK) {
         D.current_bank = bank;
     }
@@ -270,58 +329,130 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     // шины хватает не всегда — ведомый может отпускать SDA не с первой
     // серии тактов. Повтор с паузой решает это полностью (проверено пятью
     // подряд циклами сброса, docs/icm20948_driver.md §6).
+    //
+    // Адрес разрешается опросом, а не берётся на веру.
+    //
+    // Вывод AD0 задаёт младший бит адреса: 0x68 при подтяжке к земле, 0x69 при
+    // подтяжке к питанию (DS-000189 §7.1). Это аппаратная перемычка на плате
+    // модуля, а не проектное решение: два экземпляра одной и той же модели
+    // могут прийти с разной подтяжкой, что и наблюдалось на живом железе.
+    // Поэтому при неудаче по заданному адресу проверяется второй, и критерий
+    // успеха — не «кто-то ответил», а WHO_AM_I = 0xEA внутри
+    // icm20948_bus_init(). Ложно принять чужое устройство за датчик нельзя.
+    g_init_retries = 0;
+    g_stage = "подъём шины и WHO_AM_I";
     esp_err_t err = ESP_FAIL;
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        err = icm20948_bus_init(cfg);
-        if (err == ESP_OK) {
-            break;
+    icm20948_config_t use = *cfg;
+    const uint8_t candidates[2] = {
+        cfg->i2c_addr,
+        (uint8_t) (cfg->i2c_addr == ICM20948_I2C_ADDR_LOW ? ICM20948_I2C_ADDR_HIGH
+                                                          : ICM20948_I2C_ADDR_LOW),
+    };
+    for (int attempt = 0; attempt < 3 && err != ESP_OK; ++attempt) {
+        for (int c = 0; c < 2; ++c) {
+            use.i2c_addr = candidates[c];
+            err = icm20948_bus_init(&use);
+            if (err == ESP_OK) {
+                break;
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        if (err != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
     }
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
+    // Дальше работаем с разрешённым адресом. icm20948_bus_init уже записал его
+    // в D.cfg, поэтому icm20948_active_config() отдаёт фактический, а не
+    // ожидавшийся адрес — это важно и для консоли, и для сброса шины.
+    cfg = &use;
 
     // 1. Аппаратный сброс. Гарантирует известное состояние независимо от
     //    того, что делал с датчиком предыдущий запуск прошивки.
     //    DS-000189 §7.1, PWR_MGMT_1.DEVICE_RESET.
+    g_stage = "аппаратный сброс (PWR_MGMT_1.DEVICE_RESET)";
     err = reg_write(REG_PWR_MGMT_1, PWR_MGMT_1_DEVICE_RESET);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
-    // Datasheet §10 «Power-on reset time»: 100 мс с запасом перекрывает
-    // время внутренней инициализации.
+    // Datasheet §10 «Power-on reset time» даёт около 100 мс, и раньше этого
+    // ждали фиксированной паузой. На втором экземпляре модуля этого не
+    // хватило: сам сброс проходил, а следующая запись возвращала NACK.
+    //
+    // Фиксированная пауза здесь и не может быть правильной: 100 мс — типовое
+    // значение, а не гарантия, и разброс между экземплярами datasheet не
+    // нормирует. Поэтому ждём не время, а факт: датчик снова отвечает и
+    // отдаёт свой WHO_AM_I. Верхняя граница ожидания — 400 мс, втрое больше
+    // типового, дальше это уже отказ, а не задержка.
     vTaskDelay(pdMS_TO_TICKS(100));
     D.current_bank = 0xFF;
+
+    g_stage = "ожидание готовности после сброса";
+    err = ESP_ERR_TIMEOUT;
+    int64_t wait_t0 = esp_timer_get_time();
+    for (int i = 0; i < 300; ++i) {
+        uint8_t who = 0;
+        if (icm20948_who_am_i(&who) == ESP_OK && who == ICM20948_WHO_AM_I_VALUE) {
+            err = ESP_OK;
+            break;
+        }
+        // После неудачной транзакции состояние банка неизвестно.
+        D.current_bank = 0xFF;
+        // Каждые 10 попыток — попытка расшевелить шину: если ведомый застрял
+        // посреди байта и держит SDA, сам он её не отпустит.
+        if (i && i % 10 == 0) {
+            i2c_master_bus_reset(D.bus);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    D.reset_wait_us = (uint32_t) (esp_timer_get_time() - wait_t0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s), ждали %" PRIu32 " мс", g_stage,
+                 esp_err_to_name(err), D.reset_wait_us / 1000);
+        return err;
+    }
+    ESP_LOGI(TAG, "датчик ответил через %" PRIu32 " мс после DEVICE_RESET (пауза datasheet 100 мс)",
+             100 + D.reset_wait_us / 1000);
 
     // 2. Снять сон и выбрать источник тактирования. CLKSEL = 1 — «auto select
     //    best available», рекомендованный datasheet режим (§7.1, PWR_MGMT_1):
     //    внутренний осциллятор 20 МГц уступает место PLL гироскопа, когда тот
     //    запустится. Значение 0 (internal 20 MHz) хуже по стабильности.
-    err = reg_write(REG_PWR_MGMT_1, PWR_MGMT_1_CLKSEL_AUTO);
+    g_stage = "пробуждение (PWR_MGMT_1.CLKSEL)";
+    err = reg_write_retry(REG_PWR_MGMT_1, PWR_MGMT_1_CLKSEL_AUTO);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
     // §10 «Gyroscope start-up time»: 35 мс до выхода на режим.
     vTaskDelay(pdMS_TO_TICKS(40));
 
     // 3. Включить все шесть осей. PWR_MGMT_2 = 0: ни один датчик не отключён.
-    err = reg_write(REG_PWR_MGMT_2, 0x00);
+    g_stage = "включение всех осей (PWR_MGMT_2)";
+    err = reg_write_retry(REG_PWR_MGMT_2, 0x00);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
     // 4. Шкалы, фильтры, частота выдачи — всё в USER BANK 2.
-    err = select_bank(2);
+    g_stage = "выбор банка 2";
+    err = select_bank_retry(2);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
     // ODR_ALIGN_EN = 1: выдача акселерометра и гироскопа выравнивается по
     // одному тактовому фронту (DS-000189 §7.2). Без этого два датчика
     // расходятся по фазе, и dt между парой значений перестаёт быть общим.
-    err = reg_write(REG_ODR_ALIGN_EN, 0x01);
+    g_stage = "ODR_ALIGN_EN";
+    err = reg_write_retry(REG_ODR_ALIGN_EN, 0x01);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
@@ -330,42 +461,56 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     // становится 12106 Гц — заведомо выше Найквиста, то есть алиасинг.
     uint8_t gyro_cfg = (uint8_t) (((D.cfg.dlpf_cfg & 0x07) << 3) |
                                   ((D.cfg.gyro_fs & 0x03) << 1) | 0x01);
-    err = reg_write(REG_GYRO_CONFIG_1, gyro_cfg);
+    g_stage = "GYRO_CONFIG_1";
+    err = reg_write_retry(REG_GYRO_CONFIG_1, gyro_cfg);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
-    err = reg_write(REG_GYRO_SMPLRT_DIV, D.cfg.smplrt_div);
+    g_stage = "GYRO_SMPLRT_DIV";
+    err = reg_write_retry(REG_GYRO_SMPLRT_DIV, D.cfg.smplrt_div);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
     // ACCEL_CONFIG: та же раскладка полей.
     uint8_t accel_cfg = (uint8_t) (((D.cfg.dlpf_cfg & 0x07) << 3) |
                                    ((D.cfg.accel_fs & 0x03) << 1) | 0x01);
-    err = reg_write(REG_ACCEL_CONFIG, accel_cfg);
+    g_stage = "ACCEL_CONFIG";
+    err = reg_write_retry(REG_ACCEL_CONFIG, accel_cfg);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
     // Делитель акселерометра 12-битный и разложен на два регистра.
-    err = reg_write(REG_ACCEL_SMPLRT_DIV_1, 0x00);
+    g_stage = "ACCEL_SMPLRT_DIV_1";
+    err = reg_write_retry(REG_ACCEL_SMPLRT_DIV_1, 0x00);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
-    err = reg_write(REG_ACCEL_SMPLRT_DIV_2, D.cfg.smplrt_div);
+    g_stage = "ACCEL_SMPLRT_DIV_2";
+    err = reg_write_retry(REG_ACCEL_SMPLRT_DIV_2, D.cfg.smplrt_div);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
-    err = select_bank(0);
+    g_stage = "возврат в банк 0";
+    err = select_bank_retry(0);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
     // 5. I2C master датчика (для внешнего магнитометра AK09916) не включаем:
     //    магнитометр Refloat не использует (imu_ref_callback получает mag =
     //    NULL), а лишний обмен занимал бы шину.
-    err = reg_write(REG_USER_CTRL, 0x00);
+    g_stage = "USER_CTRL (I2C-мастер датчика выключен)";
+    err = reg_write_retry(REG_USER_CTRL, 0x00);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
@@ -444,6 +589,68 @@ esp_err_t icm20948_read(icm20948_sample_t *out) {
     D.last = *out;
     D.have_last = true;
     return ESP_OK;
+}
+
+// --------------------------------------------------------------- диагностика
+
+// Гарантировать наличие мастера на шине, не требуя, чтобы датчик ответил.
+// icm20948_bus_init() возвращает ошибку, если WHO_AM_I не совпал, но мастер
+// при этом уже создан — а для скана именно он и нужен.
+static esp_err_t ensure_bus(const icm20948_config_t *cfg) {
+    if (D.bus) {
+        return ESP_OK;
+    }
+    icm20948_bus_init(cfg);
+    return D.bus ? ESP_OK : ESP_ERR_INVALID_STATE;
+}
+
+esp_err_t icm20948_scan(const icm20948_config_t *cfg, uint8_t *found, size_t max, size_t *n_out) {
+    if (!cfg || !found || !n_out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *n_out = 0;
+    esp_err_t err = ensure_bus(cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    // 0x08…0x77 — диапазон адресов I2C за вычетом зарезервированных групп
+    // (0x00-0x07 и 0x78-0x7F, спецификация I2C-bus, раздел 3.1.12).
+    for (uint8_t addr = 0x08; addr <= 0x77; ++addr) {
+        if (i2c_master_probe(D.bus, addr, 50) == ESP_OK && *n_out < max) {
+            found[(*n_out)++] = addr;
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t icm20948_probe_addr(const icm20948_config_t *cfg, uint8_t addr, uint8_t *who) {
+    if (!cfg || !who) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = ensure_bus(cfg);
+    if (err != ESP_OK) {
+        return err;
+    }
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = addr,
+        .scl_speed_hz = cfg->i2c_hz,
+    };
+    i2c_master_dev_handle_t dev = NULL;
+    err = i2c_master_bus_add_device(D.bus, &dev_cfg, &dev);
+    if (err != ESP_OK) {
+        return err;
+    }
+    // Банк 0 — тот, в котором лежит WHO_AM_I. Состояние банка у неизвестного
+    // устройства предполагать нельзя, поэтому выбираем его явно.
+    uint8_t sel[2] = {REG_BANK_SEL, 0x00};
+    i2c_master_transmit(dev, sel, sizeof(sel), 100);
+    uint8_t reg = REG_WHO_AM_I;
+    err = i2c_master_transmit_receive(dev, &reg, 1, who, 1, 100);
+    i2c_master_bus_rm_device(dev);
+    // Банк драйвера мог быть изменён этой операцией.
+    D.current_bank = 0xFF;
+    return err;
 }
 
 icm20948_stats_t icm20948_stats(void) {

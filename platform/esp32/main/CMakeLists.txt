@@ -7,6 +7,7 @@ idf_component_register(
         "fc_vesc_if.c"
         "fc_imu_mock.c"
         "fc_imu_real.c"
+        "fc_imu_stress.c"
         "fc_adc_safe.c"
         "fc_storage_nvs.c"
         "fc_timing.c"

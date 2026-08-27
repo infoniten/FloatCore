@@ -12,12 +12,34 @@ VESC Tool / приложение  ──BLE/Wi-Fi──►  ESP32
                                          └─ Motor abstraction ──CAN──► VESC A + VESC B
 ```
 
-## Статус: Этап 0.6A — Safety Supervisor, драйвер IMU, разбор джиттера
+## Статус: Этап 0.6C — реальный IMU, ориентация осей, стабильность шины I2C
 
 Реальный вывод на моторы не активирован. **Неизменённый Refloat 1.3.0 работает
 на живой плате ESP32-D0WD-V3**, физический ICM-20948 читается, все выходы на
 мотор сведены в единую точку под управлением Safety Supervisor, а джиттер
 контура разобран и уменьшен вчетверо.
+
+### Где сейчас находится интеграция IMU
+
+```text
+ICM-20948 hardware driver: implemented
+WHO_AM_I / raw acquisition: verified on hardware
+orientation mapping:       measured
+board transform:           documented
+stress tooling:            implemented
+
+Refloat input source:      STILL MOCK IMU
+
+I2C / IMU communication:
+    DEVELOPMENT:                 usable
+    FINAL HARDWARE QUALIFICATION: pending
+```
+
+Читать это следует буквально: **Refloat по-прежнему получает данные от
+mock-IMU**, а не от физического датчика. Драйвер, привязка осей и
+инструментарий готовы, но мост между ними и контуром не построен — это
+отдельный этап, и до него открыт список условий в
+[docs/esp32_safety.md](docs/esp32_safety.md) §8.
 
 Готово:
 
@@ -26,8 +48,20 @@ VESC Tool / приложение  ──BLE/Wi-Fi──►  ESP32
 * **Motor Gate** — все 12 выходов SDK VESC сведены в одну функцию,
   `physically_sent == 0` во всех тестах;
 * **драйвер ICM-20948** с обоснованием каждого регистра по datasheet
-  ([docs/icm20948_driver.md](docs/icm20948_driver.md)); данные в Refloat пока
-  не идут — ориентация датчика не зафиксирована;
+  ([docs/icm20948_driver.md](docs/icm20948_driver.md)); адрес разрешается
+  опросом (0x68 или 0x69 в зависимости от AD0), готовность после сброса
+  ожидается по факту, а не по фиксированной паузе. **Данные в Refloat не идут:
+  контур работает от mock-IMU**;
+* **привязка осей датчика к осям доски измерена** шестью движениями с проверкой
+  внутренней непротиворечивости и сверкой с соглашением Refloat по исходникам
+  ([docs/imu_orientation_mapping.md](docs/imu_orientation_mapping.md)).
+  Transform документирован, но **к Refloat не подключён**;
+* **стресс-тест шины I2C** `imu_stress`: чтение без пауз на ~1640 Гц со
+  статистикой, классификацией ошибок, предысторией отказа и настраиваемыми
+  частотой шины и порогом восстановления
+  ([docs/i2c_stress_test.md](docs/i2c_stress_test.md)). Стабильность шины после
+  переборки железа существенно выросла, но квалификация на финальной
+  механической компоновке **не пройдена**;
 * **источник джиттера найден и устранён**: активное ожидание в `sleep_us`,
   опоздания контура 4.4 % → 1.0 % ([docs/realtime_timing.md](docs/realtime_timing.md));
 * **политика записи**: только в `DISARMED` и только вне realtime — остановка

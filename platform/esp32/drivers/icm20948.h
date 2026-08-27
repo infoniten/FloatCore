@@ -12,6 +12,7 @@
 #include "esp_err.h"
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define ICM20948_WHO_AM_I_VALUE 0xEA
@@ -87,6 +88,14 @@ esp_err_t icm20948_read(icm20948_sample_t *out);
 icm20948_stats_t icm20948_stats(void);
 const icm20948_config_t *icm20948_active_config(void);
 
+/** Последний выполненный шаг icm20948_init() — чтобы отказ был адресным. */
+const char *icm20948_last_stage(void);
+
+/** Сколько повторов записи потребовалось при последней инициализации. */
+uint32_t icm20948_init_retries(void);
+/** Сколько ждали ответа датчика после DEVICE_RESET, мкс. */
+uint32_t icm20948_reset_wait_us(void);
+
 /** Чувствительности для текущих шкал: LSB на 1 g и LSB на 1 °/с. */
 float icm20948_accel_lsb_per_g(icm20948_accel_fs_t fs);
 float icm20948_gyro_lsb_per_dps(icm20948_gyro_fs_t fs);
@@ -94,6 +103,21 @@ float icm20948_accel_fs_g(icm20948_accel_fs_t fs);
 float icm20948_gyro_fs_dps(icm20948_gyro_fs_t fs);
 /** Фактическая частота выдачи для делителя. */
 float icm20948_odr_hz(uint8_t smplrt_div);
+
+/**
+ * Скан шины: опросить адреса 0x08…0x77 и вернуть все ответившие.
+ *
+ * Нужен, когда датчик не отвечает по ожидаемому адресу: без скана невозможно
+ * отличить «модуль на 0x69 (AD0 подтянут)» от «модуль не подключён» и от
+ * «перепутаны SDA и SCL». Только опрос адреса, никаких записей в регистры.
+ *
+ * Если шина ещё не поднята, поднимает её по cfg. Вызывать, когда штатная
+ * задача чтения не работает: у драйвера один читатель.
+ */
+esp_err_t icm20948_scan(const icm20948_config_t *cfg, uint8_t *found, size_t max, size_t *n_out);
+
+/** WHO_AM_I по произвольному адресу — для проверки найденного сканом. */
+esp_err_t icm20948_probe_addr(const icm20948_config_t *cfg, uint8_t addr, uint8_t *who);
 
 /** Диагностика: заставить следующие N чтений завершиться ошибкой (ТЗ §28). */
 void icm20948_inject_read_failures(int count);
