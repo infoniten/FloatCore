@@ -202,7 +202,8 @@ host: $(HOST_BIN)
 # compat/safety платформенно-нейтрален, поэтому собирается и проверяется на
 # host в том же профиле LAB_SAFE, что и прошивка.
 
-SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(ROOT)/tests/safety/test_safety.c
+SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(wildcard $(ROOT)/compat/imu/*.c) \
+              $(ROOT)/tests/safety/test_safety.c $(ROOT)/tests/imu/test_imu_pipeline.c
 SAFETY_OBJ := $(patsubst %,$(OBJ)/saf_%.o,$(notdir $(basename $(SAFETY_SRC))))
 SAFETY_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_LAB_SAFE=1
 
@@ -210,7 +211,15 @@ $(OBJ)/saf_%.o: $(ROOT)/compat/safety/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 
+$(OBJ)/saf_%.o: $(ROOT)/compat/imu/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
 $(OBJ)/saf_%.o: $(ROOT)/tests/safety/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/saf_%.o: $(ROOT)/tests/imu/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -230,7 +239,7 @@ E32_SRC := $(ROOT)/platform/esp32/main/fc_adc_safe.c \
            $(ROOT)/tests/esp32/stubs/stubs.c \
            $(ROOT)/tests/esp32/test_esp32_platform.c
 E32_OBJ := $(patsubst %,$(OBJ)/e32_%.o,$(notdir $(basename $(E32_SRC))))
-E32_CFLAGS := $(BASE_CFLAGS) -I$(ROOT)/tests/esp32/stubs
+E32_CFLAGS := $(BASE_CFLAGS) -I$(ROOT)/tests/esp32/stubs -DFLOATCORE_LAB_SAFE=1
 
 $(OBJ)/e32_%.o: $(ROOT)/platform/esp32/main/%.c
 	@mkdir -p $(OBJ)

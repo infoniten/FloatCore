@@ -16,8 +16,12 @@
 //    У драйвера icm20948 нет мьютекса — он рассчитан на одного читателя
 //    (fc_imu_real.c). Второй читатель дал бы состязание за шину и породил
 //    отказы, неотличимые от искомых аппаратных. Поэтому `imu_stress`
-//    останавливает задачу fc_imu_hw, работает вместо неё, а по завершении
-//    поднимает её обратно.
+//    останавливает единую realtime-задачу (fc_imu_rt), работает вместо неё, а
+//    по завершении поднимает её обратно. С v0.6D это означает, что на время
+//    теста контур Refloat не получает семплов вовсе: супервизор увидит
+//    таймаут и уйдёт в FAULT. Это объявляется в выводе теста, а не
+//    маскируется — исключительное владение шиной важнее красивого лога
+//    (ТЗ v0.6D §27).
 //
 // 2. Статистика ведётся СВОЯ, а не берётся из icm20948_stats().
 //    Сброс шины (icm20948_init) внутри себя делает memset всей структуры
@@ -87,6 +91,12 @@ typedef struct {
     uint32_t consecutive_failures;
     uint32_t max_consecutive_failures;
     uint64_t suppressed_reports;
+    // Сколько чтений вернуло НОВЫЕ слова движения (accel+gyro, без
+    // температуры: у неё своя частота обновления). Отношение к общему числу
+    // чтений даёт фактическую частоту обновления регистров данных — её
+    // невозможно получить из datasheet, если ODR и частота обновления
+    // регистров различаются.
+    uint64_t motion_changed;
     // Температура кристалла датчика. Читается в каждом семпле всё равно
     // (DS-000189 §8.2), но раньше не выводилась. Понадобилась, когда отказы
     // в покое начали появляться не сразу, а после десятков секунд работы:
@@ -305,6 +315,9 @@ static void print_summary(uint64_t now) {
            s->reads_ok ? (double) s->sum_transaction_us / (double) s->reads_ok : 0.0);
     printf("Average rate:          %.0f reads/s\n",
            secs > 0.0 ? (double) s->reads_total / secs : 0.0);
+    printf("Motion updates:        %llu (%.0f Hz) — фактическая частота обновления регистров\n",
+           (unsigned long long) s->motion_changed,
+           secs > 0.0 ? (double) s->motion_changed / secs : 0.0);
     if (s->have_temp) {
         printf("Sensor temp:           старт %.1f C, конец %.1f C, мин %.1f, макс %.1f (нагрев %+.1f)\n",
                (double) s->temp_first_c, (double) s->temp_last_c, (double) s->temp_min_c,
@@ -358,6 +371,8 @@ static void stress_task(void *arg) {
     // Копия конфигурации ОБЯЗАТЕЛЬНА: icm20948_bus_init делает memset всей
     // своей структуры, а icm20948_active_config() указывает внутрь неё.
     icm20948_config_t cfg = *icm20948_active_config();
+    int16_t prev_motion[6];
+    bool have_prev_motion = false;
 
     // Необязательная смена частоты шины — диагностический разделитель гипотез
     // (docs/i2c_stress_test.md §5). Отказы, вызванные нехваткой запаса по
@@ -365,7 +380,7 @@ static void stress_task(void *arg) {
     // вчетверо. Отказы механической природы от частоты почти не зависят.
     //
     // Меняется ТОЛЬКО на время теста и только для этой задачи: восстановление
-    // идёт через fc_imu_real_start(), который берёт icm20948_default_config()
+    // идёт через fc_imu_rt_start(), который берёт icm20948_default_config()
     // и тем самым возвращает штатные 400 кГц. Настройки датчика (шкалы, ODR,
     // DLPF) не трогаются — меняется скорость шины, а не режим измерения.
     bool rate_overridden = false;
@@ -402,7 +417,8 @@ static void stress_task(void *arg) {
         printf("imu_stress: сброс шины ОТКЛЮЧЁН — измеряем, восстановится ли она сама\n");
     }
     printf("imu_stress: штатная задача fc_imu_hw на время теста остановлена\n");
-    printf("imu_stress: Refloat продолжает работать от mock-IMU, выход на мотор заблокирован\n");
+    printf("imu_stress: контур на время теста без данных, супервизор уйдёт в FAULT;\n");
+    printf("            выход на мотор при этом остаётся заблокированным\n");
     printf("imu_stress: ПО ОКОНЧАНИИ Supervisor защёлкнет IMU_UNHEALTHY — это ожидаемо, см. итог\n\n");
     fflush(stdout);
 
@@ -425,6 +441,11 @@ static void stress_task(void *arg) {
 
         if (err == ESP_OK) {
             ++S.st.reads_ok;
+            if (!have_prev_motion || memcmp(prev_motion, s.raw, sizeof(prev_motion)) != 0) {
+                ++S.st.motion_changed;
+                memcpy(prev_motion, s.raw, sizeof(prev_motion));
+                have_prev_motion = true;
+            }
             if (!S.st.have_temp) {
                 S.st.have_temp = true;
                 S.st.temp_first_c = s.temperature_c;
@@ -547,7 +568,7 @@ static void stress_task(void *arg) {
     // быть обнулена под нами, пока эта задача ещё печатает и поднимает
     // fc_imu_hw. Две задачи на одной шине без мьютекса — то самое
     // состязание, которого мы избегали.
-    if (!fc_imu_real_start()) {
+    if (!fc_imu_rt_start()) {
         printf("imu_stress: ВНИМАНИЕ, штатная задача чтения не поднялась, датчик не отвечает\n");
     } else {
         printf("imu_stress: штатная задача fc_imu_hw восстановлена (500 Гц)\n");
@@ -586,18 +607,18 @@ bool fc_imu_stress_start(uint32_t seconds, uint32_t i2c_hz, uint32_t reset_thres
     if (S.active) {
         return false;
     }
-    if (!fc_imu_real_available()) {
+    if (!fc_imu_rt_available()) {
         return false;
     }
 
     // Остановить штатного читателя и дождаться, пока он действительно уйдёт:
-    // fc_imu_real_stop() только снимает флаг, задача завершается на следующей
+    // fc_imu_rt_stop() только снимает флаг, задача завершается на следующей
     // итерации (до 2 мс).
-    fc_imu_real_stop();
-    for (int i = 0; i < 100 && fc_imu_real_running(); ++i) {
+    fc_imu_rt_stop();
+    for (int i = 0; i < 100 && fc_imu_rt_running(); ++i) {
         vTaskDelay(pdMS_TO_TICKS(5));
     }
-    if (fc_imu_real_running()) {
+    if (fc_imu_rt_running()) {
         return false;
     }
 
@@ -626,7 +647,7 @@ bool fc_imu_stress_start(uint32_t seconds, uint32_t i2c_hz, uint32_t reset_thres
                                 &S.task, FC_CORE_HOUSEKEEPING) != pdPASS) {
         S.active = false;
         S.run = false;
-        fc_imu_real_start();
+        fc_imu_rt_start();
         return false;
     }
     return true;

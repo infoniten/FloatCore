@@ -13,8 +13,14 @@
 #include <stdio.h>
 #include <string.h>
 
-static int g_fail = 0;
-static int g_checks = 0;
+int fc_test_fail = 0;
+int fc_test_checks = 0;
+#define g_fail fc_test_fail
+#define g_checks fc_test_checks
+
+void fc_test_check(bool ok, const char *what);
+void fc_test_note(const char *fmt, ...);
+void test_imu_pipeline_all(void);
 
 static void check(bool ok, const char *what) {
     ++g_checks;
@@ -27,6 +33,21 @@ static void check(bool ok, const char *what) {
 }
 
 static void note(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    printf("      \033[90m·\033[0m ");
+    vprintf(fmt, ap);
+    printf("\n");
+    va_end(ap);
+}
+
+// Те же две функции под внешними именами: тесты тракта IMU лежат в отдельном
+// файле, но должны попадать в общий счётчик проверок.
+void fc_test_check(bool ok, const char *what) {
+    check(ok, what);
+}
+
+void fc_test_note(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     printf("      \033[90m·\033[0m ");
@@ -354,6 +375,7 @@ int main(void) {
     test_no_output_in_any_state();
     test_imu_health();
     test_build_profile();
+    test_imu_pipeline_all();
 
     printf("\n================================================================\n");
     if (g_fail == 0) {

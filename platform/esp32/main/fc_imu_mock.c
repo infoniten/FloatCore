@@ -61,19 +61,19 @@ static struct {
     volatile int stall_ms;  // диагностика: намеренная остановка контура
 } g_imu;
 
-int fc_imu_rate_hz(void) {
+int fc_imu_mock_rate_hz(void) {
     return FC_IMU_RATE_HZ;
 }
 
-bool fc_imu_startup_done(void) {
+bool fc_imu_mock_startup_done(void) {
     return g_imu.startup_done;
 }
 
-void fc_imu_set_callback(void (*cb)(float *acc, float *gyro, float *mag, float dt)) {
+void fc_imu_mock_set_callback(void (*cb)(float *acc, float *gyro, float *mag, float dt)) {
     g_imu.callback = cb;
 }
 
-void fc_imu_get_state(
+void fc_imu_mock_get_state(
     float *roll, float *pitch, float *yaw, float accel[3], float gyro[3], float quat[4]
 ) {
     if (roll) {
@@ -175,10 +175,10 @@ void fc_imu_mock_stop(void) {
     g_imu.run = false;
 }
 
-void fc_imu_inject_stall(int ms) {
+void fc_imu_mock_inject_stall(int ms) {
     g_imu.stall_ms = ms;
 }
 
-uint32_t fc_imu_stack_watermark(void) {
+uint32_t fc_imu_mock_stack_watermark(void) {
     return g_imu.task ? (uint32_t) uxTaskGetStackHighWaterMark(g_imu.task) : 0;
 }

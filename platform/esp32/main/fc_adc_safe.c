@@ -26,6 +26,8 @@
 
 #include "fc_platform.h"
 
+#include "../../../compat/safety/fc_build_profile.h"
+
 // VESC_PIN_ADC1 = 7, VESC_PIN_ADC2 = 8 (vesc_c_if.h). Числа продублированы,
 // чтобы не включать сюда заголовок SDK: этот файл видят и модули без него.
 #define FC_VESC_PIN_ADC1 7
@@ -33,12 +35,47 @@
 
 #define FC_ADC_SAFE_VOLTAGE 0.0f
 
+// Имитация нажатых футпадов — только для лабораторной диагностики (ТЗ v0.6D §16).
+//
+// Зачем понадобилась. Refloat запрашивает балансировочный ток только в
+// состоянии RUNNING, а войти в него без нажатых футпадов он не может. Между
+// тем главную проверку этапа — «наклон доски в одну сторону даёт ток в
+// восстанавливающую сторону» — нельзя провести по одному лишь pitch: знак
+// обязан быть подтверждён на запрошенном токе.
+//
+// Почему это безопасно. Имитация не касается пути к мотору вовсе: она меняет
+// только напряжение, которое видит Refloat. Запрошенный ток по-прежнему
+// проходит Motor Gate, а backend физической отправки в профиле LAB_SAFE не
+// существует как код — physically_sent обязан остаться нулём и при активном
+// RUNNING. Именно это и проверяется в ходе теста.
+//
+// Компилируется только при FC_LAB_DIAGNOSTICS. В профиле мотора этого кода
+// в двоичном файле нет.
+#if FC_LAB_DIAGNOSTICS
+static float g_sim_voltage = FC_ADC_SAFE_VOLTAGE;
+static bool g_sim_active;
+
+void fc_adc_simulate_footpads(bool on, float voltage) {
+    g_sim_active = on;
+    g_sim_voltage = on ? voltage : FC_ADC_SAFE_VOLTAGE;
+}
+
+bool fc_adc_simulation_active(void) {
+    return g_sim_active;
+}
+#endif
+
 float fc_adc_safe_voltage(void) {
     return FC_ADC_SAFE_VOLTAGE;
 }
 
 float fc_adc_read(int vesc_pin) {
     if (vesc_pin == FC_VESC_PIN_ADC1 || vesc_pin == FC_VESC_PIN_ADC2) {
+#if FC_LAB_DIAGNOSTICS
+        if (g_sim_active) {
+            return g_sim_voltage;
+        }
+#endif
         return FC_ADC_SAFE_VOLTAGE;
     }
     return -1.0f;  // остальные пины на плате не заведены

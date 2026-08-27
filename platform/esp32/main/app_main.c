@@ -4,7 +4,7 @@
 //   баннер (данные берутся из runtime API, не захардкожены)
 //   → NVS (постоянное хранилище)
 //   → VESC_IF (платформенный backend)
-//   → mock-IMU (источник ритма контура)
+//   → источник IMU (с v0.6D — реальный ICM-20948, он же источник ритма контура)
 //   → refloat_init() — тот же самый upstream, что и в host-сборке
 //   → задача отчётов + read-only консоль
 //
@@ -12,6 +12,7 @@
 // docs/esp32_safety.md.
 
 #include "fc_platform.h"
+#include "fc_imu_source.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
 #include "../../../compat/safety/fc_build_profile.h"
 #include "../../../compat/safety/fc_imu_health.h"
@@ -147,8 +148,11 @@ static void print_banner(uint32_t boot_count) {
     printf("motor:       backend %s, выход запрещён политикой супервизора\n",
            fc_motor_gate_backend_name());
     printf("can:         %s\n", fc_can_backend_name());
-    printf("imu(loop):   mock (%d Hz, покой) — контур Refloat работает от него\n",
-           fc_imu_rate_hz());
+    // Источник контура. Печатается до его запуска, поэтому берётся константа
+    // сборки, а не текущее состояние: иначе баннер сообщал бы «mock» просто
+    // потому, что реальный датчик ещё не поднимали.
+    printf("imu(loop):   %s — контур Refloat работает от него\n",
+           fc_imu_source_name_of(FC_IMU_SOURCE_DEFAULT));
     printf("adc:         mock (%.2f V, footpad disengaged)\n", (double) fc_adc_safe_voltage());
     printf("================================================\n\n");
 }
@@ -174,8 +178,8 @@ static void report_task(void *arg) {
         RefloatSnapshot s = refloat_facade_snapshot();
         printf("refloat state    %s, footpad %s\n", refloat_facade_state_name(s.state),
                refloat_facade_footpad_name(s.footpad_state));
-        printf("pitch/roll       %.3f / %.3f deg (mock IMU в покое)\n", (double) s.pitch,
-               (double) s.roll);
+        printf("pitch/roll       %.3f / %.3f deg (источник %s)\n", (double) s.pitch,
+               (double) s.roll, fc_imu_source_name());
         printf("freq (Refloat)   imu %.1f Hz, main %.1f Hz\n", (double) s.imu_frequency,
                (double) s.main_frequency);
 
@@ -201,10 +205,8 @@ static void report_task(void *arg) {
                esp_get_minimum_free_heap_size());
         // uxTaskGetStackHighWaterMark на ESP-IDF возвращает БАЙТЫ — минимум
         // свободного стека за всё время жизни задачи.
-        printf("stack %-14s свободно минимум %" PRIu32 " B из 4096\n", "fc_imu",
+        printf("stack %-14s свободно минимум %" PRIu32 " B из 5120\n", "fc_imu_rt",
                fc_imu_stack_watermark());
-        printf("stack %-14s свободно минимум %" PRIu32 " B из 4096\n", "fc_imu_hw",
-               fc_imu_real_stack_watermark());
         printf("stack %-14s свободно минимум %" PRIu32 " B из 4096\n", "fc_super",
                fc_supervisor_stack_watermark());
         printf("stack %-14s свободно минимум %" PRIu32 " B из 3072\n", "fc_nvs",
@@ -259,15 +261,20 @@ void app_main(void) {
     fc_timing_set_nominal(FC_TIMING_MAIN, 2000);
     fc_timing_set_nominal(FC_TIMING_AUX, 1000000 / 30);  // LEDS_REFRESH_RATE = 30
 
-    // 3. Физический ICM-20948. На этом этапе он НЕ подключён к Refloat
-    //    (ТЗ v0.6A §29): читается, диагностируется, в контур не идёт.
-    bool imu_hw = fc_imu_real_start();
+    // 3. Источник данных IMU. С v0.6D это физический ICM-20948, и он же
+    //    задаёт ритм контура: одна принятая выборка датчика — одна итерация
+    //    imu_ref_callback. Отдельной mock-задачи в этой конфигурации нет.
+    //
+    //    Если датчик не поднялся, подмены на mock НЕ происходит. Контур
+    //    просто не запускается: imu_startup_done() остаётся false, Refloat
+    //    стоит в STATE_STARTUP, супервизор не может уйти в READY. Тихо
+    //    подставить заглушку означало бы сделать неработающий датчик
+    //    невидимым — ровно того отказа, ради которого всё это и строится.
+    bool imu_hw = fc_imu_source_start(FC_IMU_SOURCE_DEFAULT);
+    printf("[floatcore] IMU source: %s\n", fc_imu_source_name());
     printf("[floatcore] физический IMU: %s\n",
-           imu_hw ? "ICM-20948 инициализирован, читается отдельной задачей"
-                  : "НЕ обнаружен — контур это не затрагивает, он работает от mock");
-
-    // 4. Mock-IMU: задаёт ритм контура через imu_ref_callback.
-    fc_imu_mock_start();
+           imu_hw ? "ICM-20948 инициализирован, задаёт ритм контура"
+                  : "НЕ обнаружен — контур НЕ ЗАПУЩЕН, подмены на mock нет");
 
     // 5. Настоящий Refloat. Тот же init(), что и на VESC: refloat_facade_start()
     //    подставляет lib_info.arg и вызывает refloat_init().

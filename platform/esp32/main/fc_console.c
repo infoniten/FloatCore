@@ -23,7 +23,9 @@
 #include "../../../compat/safety/fc_imu_health.h"
 #include "../../../compat/safety/fc_motor_gate.h"
 #include "../../../compat/safety/fc_supervisor.h"
+#include "../../../compat/imu/fc_imu_pipeline.h"
 #include "../drivers/icm20948.h"
+#include "fc_imu_source.h"
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -53,7 +55,8 @@ static void cmd_status(void) {
     printf("footpad           %s (adc %.2f / %.2f V)\n",
            refloat_facade_footpad_name(s.footpad_state), (double) s.adc_left,
            (double) s.adc_right);
-    printf("pitch / roll      %.2f / %.2f deg (mock IMU)\n", (double) s.pitch, (double) s.roll);
+    printf("pitch / roll      %.2f / %.2f deg (источник %s)\n", (double) s.pitch,
+           (double) s.roll, fc_imu_source_name());
     printf("imu / main freq   %.1f / %.1f Hz (по счётчикам Refloat)\n", (double) s.imu_frequency,
            (double) s.main_frequency);
     printf("motor backend     %s\n", fc_motor_gate_backend_name());
@@ -92,13 +95,23 @@ static void cmd_imu(void) {
     const icm20948_config_t *cfg = icm20948_active_config();
     icm20948_stats_t st = icm20948_stats();
     FcImuHealthStatus h = fc_imu_health_status();
+    FcImuPipelineStats ps = fc_imu_pipeline_stats();
+    FcImuSample sm = fc_imu_pipeline_sample();
+    RefloatSnapshot rs = refloat_facade_snapshot();
+    FcMotorGateStats mg = fc_motor_gate_stats();
+    bool real = fc_imu_source() == FC_IMU_SOURCE_REAL;
+    uint64_t now = fc_uptime_us();
 
-    printf("драйвер           %s\n", fc_imu_real_available() ? "ICM-20948 работает" : "не поднят");
-    if (!fc_imu_real_available()) {
+    printf("IMU source        %s%s\n", fc_imu_source_name(),
+           fc_imu_source_available() ? "" : "  (НЕ ПОДНЯТ)");
+    printf("драйвер           %s\n", fc_imu_rt_available() ? "ICM-20948 работает" : "не поднят");
+    if (!fc_imu_rt_available()) {
         printf("последний шаг     %s\n", icm20948_last_stage());
     }
-    printf("инициализация     повторов записи %" PRIu32 ", ожидание после сброса %" PRIu32 " мс\n",
-           icm20948_init_retries(), icm20948_reset_wait_us() / 1000);
+    printf("инициализация     повторов записи %" PRIu32 ", ожидание после сброса %" PRIu32
+           " мс, реинициализаций %llu\n",
+           icm20948_init_retries(), icm20948_reset_wait_us() / 1000,
+           (unsigned long long) fc_imu_rt_reinits());
     printf("шина              SDA=GPIO%d SCL=GPIO%d, %" PRIu32 " Гц, адрес 0x%02x\n",
            cfg->sda_gpio, cfg->scl_gpio, cfg->i2c_hz, cfg->i2c_addr);
     printf("шкалы             accel ±%.0f g (%.0f LSB/g), gyro ±%.0f °/с (%.1f LSB/(°/с))\n",
@@ -106,8 +119,9 @@ static void cmd_imu(void) {
            (double) icm20948_accel_lsb_per_g(cfg->accel_fs),
            (double) icm20948_gyro_fs_dps(cfg->gyro_fs),
            (double) icm20948_gyro_lsb_per_dps(cfg->gyro_fs));
-    printf("ODR               %.1f Гц (SMPLRT_DIV=%u), DLPF cfg %u\n",
-           (double) icm20948_odr_hz(cfg->smplrt_div), cfg->smplrt_div, cfg->dlpf_cfg);
+    printf("регистры / контур %.0f Гц обновления регистров (измерено) / %d Гц контур,"
+           " startup_done %d\n",
+           1125.0, fc_imu_rate_hz(), fc_imu_startup_done());
     printf("транзакции        ok=%llu failed=%llu, средняя %.1f мкс, худшая %" PRIu32 " мкс\n",
            (unsigned long long) st.reads_ok, (unsigned long long) st.reads_failed,
            st.reads_ok ? (double) st.sum_transaction_us / (double) st.reads_ok : 0.0,
@@ -117,18 +131,70 @@ static void cmd_imu(void) {
            (unsigned long long) h.read_errors, (unsigned long long) h.stuck_events,
            (unsigned long long) h.stale_events, (unsigned long long) h.timeout_events);
 
-    // Сырые значения в осях датчика. Никакого пересчёта в оси доски здесь
-    // нет и на этом этапе быть не должно (ТЗ v0.6A §4).
-    const FcImuRawSample *g = &h.last_good;
-    float mag = sqrtf(g->accel_g[0] * g->accel_g[0] + g->accel_g[1] * g->accel_g[1] +
-                      g->accel_g[2] * g->accel_g[2]);
-    printf("последний семпл   acc %+7.3f %+7.3f %+7.3f g |a|=%.3f\n", (double) g->accel_g[0],
-           (double) g->accel_g[1], (double) g->accel_g[2], (double) mag);
-    printf("                  gyro %+8.2f %+8.2f %+8.2f °/с, %.1f °C\n", (double) g->gyro_dps[0],
-           (double) g->gyro_dps[1], (double) g->gyro_dps[2], (double) g->temperature_c);
-    printf("оси               СЫРЫЕ, в системе координат датчика. Привязка к доске отложена\n");
-    printf("                  до финального монтажа (docs/esp32_architecture.md, v0.6B)\n");
-    printf("в Refloat         НЕ передаются: контур работает от mock (ТЗ v0.6A §29)\n");
+    // Тракт: сколько опросов во что превратилось. Именно здесь видно
+    // соотношение «одна физическая выборка — одна итерация контура».
+    printf("тракт             опросов %llu -> принято %llu, дубликатов %llu, отвергнуто %llu,\n",
+           (unsigned long long) ps.polls, (unsigned long long) ps.accepted,
+           (unsigned long long) ps.duplicates, (unsigned long long) ps.rejected);
+    printf("                  сбоев чтения %llu, подозрений на пропуск %llu, дубликатов подряд max %"
+           PRIu32 "\n",
+           (unsigned long long) ps.read_failures, (unsigned long long) ps.suspected_skips,
+           ps.max_consecutive_duplicates);
+    printf("калибровка gyro   %s, смещение %+.2f %+.2f %+.2f °/с (семплов %" PRIu32
+           ", перезапусков %" PRIu32 ")\n",
+           fc_imu_cal_state_name(ps.cal_state), (double) ps.gyro_bias_dps[0],
+           (double) ps.gyro_bias_dps[1], (double) ps.gyro_bias_dps[2], ps.cal_samples,
+           ps.cal_restarts);
+    if (ps.gaps_counted) {
+        printf("                  интервал между принятыми: mean %.0f, min %llu, max %llu мкс\n",
+               (double) ps.sum_gap_us / (double) ps.gaps_counted,
+               (unsigned long long) ps.min_gap_us, (unsigned long long) ps.max_gap_us);
+    }
+
+    if (real && fc_imu_pipeline_has_sample()) {
+        float mag = sqrtf(sm.accel_g[0] * sm.accel_g[0] + sm.accel_g[1] * sm.accel_g[1] +
+                          sm.accel_g[2] * sm.accel_g[2]);
+        printf("семпл #%" PRIu32 "        возраст %.1f мс, dt %.0f мкс\n", sm.sample_counter,
+               (double) (now - sm.timestamp_us) / 1000.0, (double) sm.dt_s * 1e6);
+        printf("  raw accel       %+7.3f %+7.3f %+7.3f g  |a|=%.3f\n", (double) sm.accel_g[0],
+               (double) sm.accel_g[1], (double) sm.accel_g[2], (double) mag);
+        printf("  raw gyro        %+8.2f %+8.2f %+8.2f °/с   (%+7.4f %+7.4f %+7.4f рад/с)\n",
+               (double) sm.gyro_dps[0], (double) sm.gyro_dps[1], (double) sm.gyro_dps[2],
+               (double) sm.gyro_rad_s[0], (double) sm.gyro_rad_s[1], (double) sm.gyro_rad_s[2]);
+        printf("  температура     %.1f °C\n", (double) sm.temperature_c);
+        printf("  AHRS платформы  pitch %+7.3f  roll %+7.3f  yaw %+8.3f град\n",
+               (double) (sm.pitch_rad * 57.29578f), (double) (sm.roll_rad * 57.29578f),
+               (double) (sm.yaw_rad * 57.29578f));
+    } else if (!real) {
+        printf("семпл             mock: покой, acc (0,0,+1) g, gyro 0\n");
+    } else {
+        printf("семпл             ЕЩЁ НЕ ПОЛУЧЕН\n");
+    }
+
+    // То, что из этих данных сделал сам Refloat, и куда это ушло.
+    printf("Refloat           state %s, pitch %+7.3f, balance_pitch %+7.3f, roll %+7.3f град\n",
+           refloat_facade_state_name(rs.state), (double) rs.pitch, (double) rs.balance_pitch,
+           (double) rs.roll);
+    printf("                  pitch_rate %+8.3f, setpoint %+6.3f, imu %.1f Гц, main %.1f Гц\n",
+           (double) rs.pitch_rate, (double) rs.setpoint, (double) rs.imu_frequency,
+           (double) rs.main_frequency);
+    // Два разных числа, и их легко перепутать.
+    //
+    // balance_current — внутреннее сглаженное значение PID. В состоянии READY
+    // Refloat его не обновляет, поэтому там оно ПРОСРОЧЕНО и показывает
+    // последнее значение из RUNNING. Правда о том, что реально запрошено —
+    // последнее значение, дошедшее до Motor Gate.
+    printf("запрошенный ток   %+8.3f A (PID balance_current%s)\n", (double) rs.balance_current,
+           rs.state == 3 ? "" : ", НЕ обновляется вне RUNNING");
+    printf("последний запрос  %+8.3f A через Motor Gate (%llu запросов set_current)\n",
+           (double) mg.last_value[FC_MOTOR_REQ_CURRENT],
+           (unsigned long long) mg.by_kind[FC_MOTOR_REQ_CURRENT]);
+    printf("supervisor        %s\n", fc_supervisor_state_name(fc_supervisor_state()));
+    printf("Motor Gate        requested=%llu allowed=%llu sent=%llu backend=%s\n",
+           (unsigned long long) mg.requests_total, (unsigned long long) mg.allowed_by_policy,
+           (unsigned long long) mg.physically_sent, fc_motor_gate_backend_name());
+    printf("оси               СЫРЫЕ, в системе координат датчика: преобразование к осям доски\n");
+    printf("                  тождественно (docs/imu_orientation_mapping.md §8)\n");
 }
 
 // Скан шины I2C. SAFE_READONLY, но формулировка требует точности: команда
@@ -140,7 +206,7 @@ static void cmd_imu(void) {
 // инициализировался), команда поднимает её — именно для этого случая она и
 // нужна.
 static void cmd_i2cscan(void) {
-    if (fc_imu_real_running()) {
+    if (fc_imu_rt_running()) {
         printf("i2cscan: штатная задача чтения активна — у драйвера один читатель.\n");
         printf("  остановите её: imu-stop-confirm, затем повторите скан\n");
         return;
@@ -184,10 +250,8 @@ static void cmd_i2cscan(void) {
 
 static void cmd_tasks(void) {
     printf("задачи FloatCore:\n");
-    printf("  %-14s свободно минимум %u B из 4096 (контур, mock IMU)\n", "fc_imu",
-           (unsigned) fc_imu_stack_watermark());
-    printf("  %-14s свободно минимум %u B из 4096 (чтение ICM-20948)\n", "fc_imu_hw",
-           (unsigned) fc_imu_real_stack_watermark());
+    printf("  %-14s свободно минимум %u B из 5120 (единая цепочка: датчик -> Refloat)\n",
+           "fc_imu_rt", (unsigned) fc_imu_stack_watermark());
     printf("  %-14s свободно минимум %u B из 4096 (supervisor)\n", "fc_super",
            (unsigned) fc_supervisor_stack_watermark());
     printf("  %-14s свободно минимум %u B из 3072 (хранилище)\n", "fc_nvs",
@@ -388,19 +452,21 @@ static void cmd_crashtest(void) {
 // (ТЗ v0.6A §20) на одной и той же прошивке: иначе сравнивались бы разные
 // двоичные файлы, и разницу нельзя было бы приписать именно IMU.
 static void cmd_imu_stop(void) {
-    fc_imu_real_stop();
+    fc_imu_rt_stop();
     printf("imu-stop: задача чтения ICM-20948 останавливается\n");
-    printf("  контур это не затрагивает: он работает от mock\n");
+    printf("  ВНИМАНИЕ: с v0.6D контур питается от этого же датчика — он остановится,\n");
+    printf("  и супервизор уйдёт в FAULT по таймауту тика. Это ожидаемо.\n");
 }
 
 static void cmd_imu_start(void) {
-    bool ok = fc_imu_real_start();
+    bool ok = fc_imu_rt_start();
     printf("imu-start: %s\n", ok ? "задача чтения запущена" : "датчик не отвечает");
 }
 
 // Стресс-тест шины I2C (ТЗ v0.6C). Категория STATE_CHANGING: замещает
 // штатную задачу чтения датчика, но физически безопасен — путей к мотору в
-// нём нет, а Refloat всё это время работает от mock-IMU.
+// нём нет. Но контур на время теста остаётся без данных: датчик один, и
+// владение шиной исключительное (ТЗ v0.6D §27).
 static void cmd_imu_stress(const char *arg) {
     uint32_t seconds = 150;  // > 2 минут по ТЗ, с запасом на разгон
     uint32_t khz = 0;        // 0 — штатные 400 кГц
@@ -459,6 +525,19 @@ static void cmd_imu_stress_stop(void) {
     printf("imu_stress: остановка запрошена, итоговый отчёт напечатает сама задача\n");
 }
 
+// Имитация нажатых футпадов (ТЗ v0.6D §16). LAB_DIAGNOSTICS: меняет только
+// напряжение, которое видит Refloat, и ни на шаг не приближает к мотору.
+static void cmd_footpad_sim(bool on) {
+    fc_adc_simulate_footpads(on, 3.0f);
+    printf("footpad-sim: имитация %s (%.1f В на обоих каналах, порог 2.0 В)\n",
+           on ? "ВКЛЮЧЕНА" : "выключена", on ? 3.0 : 0.0);
+    if (on) {
+        printf("  Refloat сможет войти в RUNNING и начнёт запрашивать балансировочный ток.\n");
+        printf("  Выход на мотор при этом не появляется: backend физической отправки в\n");
+        printf("  профиле LAB_SAFE отсутствует как код. Следите за sent= в `safety`.\n");
+    }
+}
+
 static void cmd_imu_fail(void) {
     printf("imu-fail: следующие 500 чтений ICM-20948 завершатся ошибкой\n");
     printf("  ожидается: health READ_ERROR -> supervisor FAULT (IMU_UNHEALTHY)\n");
@@ -481,6 +560,7 @@ static void cmd_help(void) {
     printf("                         restart\n");
     printf("проверка защит:          wdtest-confirm | crashtest-confirm | imu-fail-confirm |\n");
     printf("                         imu-freeze-confirm | imu-stop-confirm | imu-start\n");
+    printf("                         footpad-sim-confirm | footpad-sim-off\n");
     printf("стресс-тест шины I2C:    imu_stress [сек] [кГц] [порог_сброса] | imu_stress-stop |\n");
     printf("                         imu_stress-log\n");
 #endif
@@ -535,6 +615,10 @@ static void dispatch(const char *line) {
         cmd_imu_fail();
     } else if (!strcmp(line, "imu-freeze-confirm")) {
         cmd_imu_freeze();
+    } else if (!strcmp(line, "footpad-sim-confirm")) {
+        cmd_footpad_sim(true);
+    } else if (!strcmp(line, "footpad-sim-off")) {
+        cmd_footpad_sim(false);
     } else if (!strcmp(line, "imu_stress-stop")) {
         cmd_imu_stress_stop();
     } else if (!strcmp(line, "imu_stress-log")) {

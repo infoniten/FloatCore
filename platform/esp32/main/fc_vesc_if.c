@@ -632,6 +632,15 @@ static void if_plot_send_points(float x, float y) {
 
 // --------------------------------------------------------------- сборка IF
 
+// Параметры внутреннего AHRS, как их видит Refloat через get_cfg_float.
+//
+// Refloat не только читает их, но и ПЕРЕЗАПИСЫВАЕТ при инициализации
+// (main.c:210-214), если решит, что платформа настроена по старой схеме.
+// Поэтому платформенный фильтр обязан брать их отсюда, а не из своей копии:
+// иначе платформа сообщала бы одни параметры, а считала по другим.
+float fc_cfg_imu_mahony_kp(void);
+float fc_cfg_imu_accel_confidence_decay(void);
+
 void fc_vesc_if_init(void) {
     memset(&S, 0, sizeof(S));
 
@@ -756,8 +765,11 @@ void fc_vesc_if_init(void) {
     S.cfg_float[CFG_PARAM_IMU_mahony_kp] = 0.2f;
     S.cfg_int[CFG_PARAM_si_motor_poles] = 30;
     S.cfg_int[CFG_PARAM_si_battery_cells] = 15;
-    // Реальная частота mock-IMU: ноль Refloat трактует как FW 6.02.
+    // Фактическая частота, с которой Refloat получает семплы от выбранного
+    // источника. Ноль Refloat трактует как FW 6.02 и подставляет 620 Гц.
     S.cfg_int[CFG_PARAM_IMU_sample_rate] = fc_imu_rate_hz();
+
+    S.cfg_float[CFG_PARAM_IMU_accel_confidence_decay] = 0.1f;
 
     floatcore_vesc_if = IF;
 }
@@ -785,4 +797,12 @@ uint32_t fc_thread_stack_watermark(size_t i) {
 // используется refloat_facade_config_save_test() (ТЗ §12).
 bool floatcore_config_apply(uint8_t *data) {
     return S.cfg_set ? S.cfg_set(data) : false;
+}
+
+float fc_cfg_imu_mahony_kp(void) {
+    return S.cfg_float[CFG_PARAM_IMU_mahony_kp];
+}
+
+float fc_cfg_imu_accel_confidence_decay(void) {
+    return S.cfg_float[CFG_PARAM_IMU_accel_confidence_decay];
 }

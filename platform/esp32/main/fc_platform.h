@@ -86,23 +86,38 @@ void fc_timing_exec_end(FcTimingChannel ch);
 uint32_t fc_timing_histogram(FcTimingChannel ch, uint32_t *bins, uint32_t max_bins,
                              uint32_t *bin_width_us);
 
-// ------------------------------------------------------------- mock IMU (§8)
-/**
- * Запустить mock-IMU: задача на ядре 1, которая с частотой fc_imu_rate_hz()
- * вызывает callback, зарегистрированный Refloat через imu_set_read_callback.
- * Физического датчика нет — отдаётся строго покоящаяся ориентация.
- */
-void fc_imu_mock_start(void);
-void fc_imu_mock_stop(void);
+// ------------------------------------------------- фасад источника IMU (v0.6D)
+//
+// Единственный мост между VESC_IF и данными датчика. Ветвление по источнику
+// (mock или реальный ICM-20948) собрано в fc_imu_source.c — см. fc_imu_source.h.
 int fc_imu_rate_hz(void);
 bool fc_imu_startup_done(void);
 void fc_imu_get_state(float *roll, float *pitch, float *yaw, float accel[3], float gyro[3],
                       float quat[4]);
 void fc_imu_set_callback(void (*cb)(float *acc, float *gyro, float *mag, float dt));
 
+// ------------------------------------------------------ mock-источник (v0.5)
+/**
+ * Задача на ядре 1, которая с фиксированной частотой вызывает callback
+ * Refloat и отдаёт строго покоящуюся ориентацию. Физического датчика не
+ * касается. Используется host-тестами и как заведомо безопасный источник.
+ */
+void fc_imu_mock_start(void);
+void fc_imu_mock_stop(void);
+int fc_imu_mock_rate_hz(void);
+bool fc_imu_mock_startup_done(void);
+void fc_imu_mock_get_state(float *roll, float *pitch, float *yaw, float accel[3], float gyro[3],
+                           float quat[4]);
+void fc_imu_mock_set_callback(void (*cb)(float *acc, float *gyro, float *mag, float dt));
+uint32_t fc_imu_mock_stack_watermark(void);
+void fc_imu_mock_inject_stall(int ms);
+
 // -------------------------------------------------------------- ADC/footpad (§9)
 /** Напряжение на «пине» footpad. Возвращает FC_ADC_SAFE_VOLTAGE. */
 float fc_adc_read(int vesc_pin);
+/** Лабораторная имитация нажатых футпадов (см. fc_adc_safe.c). */
+void fc_adc_simulate_footpads(bool on, float voltage);
+bool fc_adc_simulation_active(void);
 float fc_adc_safe_voltage(void);
 
 // ------------------------------------------------------------ хранилище (§12)
@@ -140,6 +155,9 @@ const char *fc_can_backend_name(void);
 // ------------------------------------------------------------------ VESC_IF
 /** Собрать структуру vesc_c_if и опубликовать её в floatcore_vesc_if. */
 void fc_vesc_if_init(void);
+/** Параметры внутреннего AHRS в том виде, в каком их видит Refloat. */
+float fc_cfg_imu_mahony_kp(void);
+float fc_cfg_imu_accel_confidence_decay(void);
 void fc_vesc_if_deinit(void);
 /** Слот lib_info.arg; вызывается refloat_facade перед refloat_init(). */
 void floatcore_set_arg_slot(void **slot);
@@ -150,14 +168,22 @@ void fc_supervisor_task_start(void);
 uint32_t fc_supervisor_stack_watermark(void);
 void fc_print_safety_line(void);
 
-// ------------------------------------------------- физический IMU (v0.6A)
-bool fc_imu_real_start(void);
-void fc_imu_real_stop(void);
-bool fc_imu_real_available(void);
-bool fc_imu_real_running(void);
-uint64_t fc_imu_real_iterations(void);
-uint32_t fc_imu_real_max_read_us(void);
-uint32_t fc_imu_real_stack_watermark(void);
+// --------------------------- единая realtime-цепочка от датчика (v0.6D)
+// Одна задача: опрос ICM-20948 -> валидация -> AHRS -> callback Refloat.
+// Обоснование периода опроса и политики восстановления — fc_imu_rt.c.
+bool fc_imu_rt_start(void);
+void fc_imu_rt_stop(void);
+bool fc_imu_rt_available(void);
+bool fc_imu_rt_running(void);
+bool fc_imu_rt_startup_done(void);
+int fc_imu_rt_rate_hz(void);
+void fc_imu_rt_set_callback(void (*cb)(float *acc, float *gyro, float *mag, float dt));
+uint64_t fc_imu_rt_iterations(void);
+uint32_t fc_imu_rt_max_read_us(void);
+uint64_t fc_imu_rt_reinits(void);
+uint32_t fc_imu_rt_stack_watermark(void);
+void fc_imu_rt_inject_stall(int ms);
+
 uint64_t fc_uptime_us(void);
 
 // ------------------------------------------- стресс-тест шины I2C (v0.6C)
