@@ -13,6 +13,8 @@
 
 #include "../safety/fc_imu_health.h"
 #include "fc_ahrs.h"
+#include "fc_imu_calibration.h"
+#include "fc_imu_detect.h"
 #include "fc_imu_sample.h"
 
 #include <stdbool.h>
@@ -31,12 +33,19 @@ typedef enum {
     FC_IMU_PIPE_ACCEPTED,
 } FcImuPipeVerdict;
 
-// Состояние стартовой калибровки нулевого смещения гироскопа.
+// Состояние измерения ОСТАТОЧНОГО смещения гироскопа при старте.
+//
+// Именно остаточного: с v0.6E основным источником истины является постоянная
+// калибровка (fc_imu_calibration.h), как и в прошивке VESC. Стартовое
+// измерение больше ничего не вычитает — оно измеряет, что осталось ПОСЛЕ
+// применения постоянных смещений, и служит проверкой исправности. Так двойная
+// компенсация исключена по построению, а не по внимательности (ТЗ v0.6E §10,
+// вариант A).
 typedef enum {
-    FC_IMU_CAL_COLLECTING = 0,  // копим семплы, доска должна быть неподвижна
-    FC_IMU_CAL_DONE,            // смещение измерено и применяется
-    FC_IMU_CAL_REJECTED,        // измеренное смещение неправдоподобно, не применено
-} FcImuCalState;
+    FC_IMU_RESIDUAL_COLLECTING = 0,  // копим семплы, доска должна быть неподвижна
+    FC_IMU_RESIDUAL_DONE,            // остаток измерен
+    FC_IMU_RESIDUAL_REJECTED,        // остаток неправдоподобно велик
+} FcImuResidualState;
 
 typedef struct {
     uint64_t polls;              // сколько раз датчик опрашивался
@@ -54,10 +63,10 @@ typedef struct {
     uint64_t sum_gap_us;
     uint64_t gaps_counted;
 
-    FcImuCalState cal_state;
-    uint32_t cal_samples;    // сколько семплов накоплено в текущей попытке
-    uint32_t cal_restarts;   // сколько раз накопление сбрасывалось из-за движения
-    float gyro_bias_dps[3];  // измеренное смещение, °/с
+    FcImuResidualState residual_state;
+    uint32_t residual_samples;
+    uint32_t residual_restarts;
+    float residual_bias_dps[3];  // остаток ПОСЛЕ постоянной калибровки, °/с
 } FcImuPipelineStats;
 
 typedef struct {
@@ -69,28 +78,25 @@ typedef struct {
     // выдаёт данные. Но длинная серия дубликатов означает, что датчик замер.
     uint32_t stuck_duplicate_limit;
 
-    // --- стартовая калибровка нулевого смещения гироскопа -------------------
+    // --- измерение остаточного смещения гироскопа при старте ---------------
     //
-    // Нужна не «для порядка». Платформенный AHRS работает с kp = 0.2, как
-    // предписывает Refloat (main.c:210-214), то есть намеренно медленно и с
-    // опорой на гироскоп. При такой настройке постоянное смещение даёт
-    // установившуюся ошибку угла порядка bias/kp: измеренные 0.5…1.0 °/с
-    // превращаются в 2.5…5 градусов, а рыскание уходит без ограничения.
-    // Измерено на плате: pitch платформы +9.88 против balance_pitch +7.15.
+    // Не компенсация, а проверка. Постоянная калибровка уже вычла смещение;
+    // здесь измеряется, что осталось. Большой остаток означает, что калибровка
+    // устарела (смещение гироскопа зависит от температуры) или что доска при
+    // включении двигалась.
     //
-    // Сколько семплов усреднять. 500 при 500 Гц — одна секунда; этого
-    // достаточно, чтобы шум усреднился до сотых °/с, и мало настолько, что
-    // старт не затягивается.
-    uint32_t cal_samples;
+    // Одновременно это единственная защита от старта на движущейся доске:
+    // пока измерение не завершилось, imu_startup_done() возвращает false.
+    uint32_t residual_samples;
     // Порог неподвижности. Доска, которую держат в руках, даёт десятки °/с;
     // 3 °/с — заведомо выше шума покоя (сотые) и смещения (единицы), но
     // заведомо ниже любого реального движения.
-    float cal_still_gyro_dps;
+    float residual_still_gyro_dps;
     // Допуск на модуль ускорения: при переносе доски он уходит от 1 g.
-    float cal_still_accel_tol_g;
+    float residual_still_accel_tol_g;
     // Потолок правдоподобия для самого смещения. Больше — это не смещение, а
     // движущаяся доска или неисправный датчик; такое не применяется.
-    float cal_max_bias_dps;
+    float residual_max_bias_dps;
 } FcImuPipelineConfig;
 
 FcImuPipelineConfig fc_imu_pipeline_default_config(uint32_t nominal_period_us);
@@ -124,6 +130,13 @@ bool fc_imu_pipeline_has_sample(void);
 FcImuPipelineStats fc_imu_pipeline_stats(void);
 const FcAhrs *fc_imu_pipeline_ahrs(void);
 const char *fc_imu_pipe_verdict_name(FcImuPipeVerdict v);
-const char *fc_imu_cal_state_name(FcImuCalState s);
-/** Завершилась ли стартовая калибровка (успехом или отказом). */
-bool fc_imu_pipeline_calibrated(void);
+const char *fc_imu_residual_state_name(FcImuResidualState s);
+/** Завершилось ли измерение остатка (успехом или отказом). */
+bool fc_imu_pipeline_residual_ready(void);
+
+// ------------------------------------------------------- постоянная калибровка
+/** Применяемая калибровка. Действует со следующего принятого семпла. */
+void fc_imu_pipeline_set_calibration(const FcImuCalibration *c);
+FcImuCalibration fc_imu_pipeline_calibration(void);
+/** Перезапустить фильтр ориентации: нужен после смены калибровки. */
+void fc_imu_pipeline_reset_ahrs(void);

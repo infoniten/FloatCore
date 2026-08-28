@@ -12,6 +12,7 @@
 #include "fc_platform.h"
 
 #include "../../../compat/safety/fc_imu_health.h"
+#include "../../../compat/imu/fc_imu_calibration.h"
 #include "../../../compat/safety/fc_supervisor.h"
 
 #include "esp_system.h"
@@ -57,6 +58,11 @@ static void supervisor_task(void *arg) {
         fc_supervisor_report_watchdog(rr != ESP_RST_TASK_WDT && rr != ESP_RST_INT_WDT &&
                                           rr != ESP_RST_WDT,
                                       now);
+
+        // Валидная калибровка ориентации — условие READY (ТЗ v0.6E §7, §24).
+        // Без неё платформа не знает, как датчик стоит относительно доски, и
+        // все углы, которые она отдаёт Refloat, — углы датчика, а не доски.
+        fc_supervisor_report_calibration_valid(fc_imu_rt_cal_status() == FC_IMU_CAL_VALID, now);
 
         fc_supervisor_poll(now);
     }

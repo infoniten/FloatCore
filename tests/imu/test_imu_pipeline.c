@@ -203,55 +203,60 @@ static void test_skip_detection(void) {
     check(st.max_gap_us >= NOMINAL_US * 2, "максимальный интервал зафиксирован");
 }
 
-static void test_gyro_bias_calibration(void) {
-    printf("\n\033[1mСтартовая калибровка смещения гироскопа\033[0m\n");
+static void test_residual_bias(void) {
+    printf("\n\033[1mОстаточное смещение измеряется, но НЕ вычитается\033[0m\n");
     reset_pipeline();
     uint64_t t = 1000000;
-    // Неподвижная доска со смещением +1.0 / -0.5 / +0.3 °/с.
+    // Неподвижная доска со смещением +1.0 / -0.5 / +0.3 °/с и БЕЗ постоянной
+    // калибровки: значит весь этот сдвиг и есть остаток.
     for (int i = 0; i < 900; ++i) {
         t += NOMINAL_US;
         float j = (i % 11) * 0.0005f;
         feed(true, 0.0f + j, 0.0f, 1.0f, 1.0f, -0.5f, 0.3f, 25.0f, t);
     }
     FcImuPipelineStats st = fc_imu_pipeline_stats();
-    check(st.cal_state == FC_IMU_CAL_DONE, "калибровка завершилась");
-    check(fabsf(st.gyro_bias_dps[0] - 1.0f) < 0.05f, "смещение по X измерено");
-    check(fabsf(st.gyro_bias_dps[1] + 0.5f) < 0.05f, "смещение по Y измерено");
-    check(fc_imu_pipeline_calibrated(), "тракт сообщает о завершении");
-    FcImuSample s = fc_imu_pipeline_sample();
-    check(fabsf(s.gyro_dps[0]) < 0.05f, "смещение вычтено из того, что уходит дальше");
-    note("измерено %+.3f %+.3f %+.3f °/с", (double) st.gyro_bias_dps[0],
-         (double) st.gyro_bias_dps[1], (double) st.gyro_bias_dps[2]);
+    check(st.residual_state == FC_IMU_RESIDUAL_DONE, "измерение остатка завершилось");
+    check(fabsf(st.residual_bias_dps[0] - 1.0f) < 0.05f, "остаток по X измерен");
+    check(fabsf(st.residual_bias_dps[1] + 0.5f) < 0.05f, "остаток по Y измерен");
+    check(fc_imu_pipeline_residual_ready(), "тракт сообщает о завершении");
 
-    printf("\n\033[1mКалибровка не проходит на движущейся доске\033[0m\n");
-    reset_pipeline();
-    t = 1000000;
-    for (int i = 0; i < 600; ++i) {
-        t += NOMINAL_US;
-        float j = (i % 11) * 0.0005f;
-        // Каждый сотый семпл — движение: накопление обязано сброситься.
-        float g = (i % 100 == 0) ? 40.0f : 1.0f;
-        feed(true, 0.0f + j, 0.0f, 1.0f, g, 0.0f, 0.0f, 25.0f, t);
-    }
-    st = fc_imu_pipeline_stats();
-    check(st.cal_state == FC_IMU_CAL_COLLECTING, "калибровка не завершена");
-    check(st.cal_restarts > 0, "накопление сбрасывалось при движении");
-    check(!fc_imu_pipeline_calibrated(), "тракт не сообщает о завершении -> контур не стартует");
+    // Главная проверка этого набора: то, что уходит дальше, НЕ поправлено.
+    // Иначе получилась бы вторая компенсация поверх постоянных смещений.
+    FcImuSample sm = fc_imu_pipeline_sample();
+    check(fabsf(sm.gyro_dps[0] - 1.0f) < 0.01f,
+          "гироскоп НЕ скорректирован остатком: двойной компенсации нет");
+    check(fabsf(sm.gyro_raw_dps[0] - 1.0f) < 0.01f, "сырое значение сохранено отдельно");
+    note("остаток %+.3f %+.3f %+.3f °/с при том же gyro_dps %+.3f", (double) st.residual_bias_dps[0],
+         (double) st.residual_bias_dps[1], (double) st.residual_bias_dps[2],
+         (double) sm.gyro_dps[0]);
 
-    printf("\n\033[1mНеправдоподобное смещение не применяется\033[0m\n");
+    printf("\n\033[1mИзмерение остатка не проходит на движущейся доске\033[0m\n");
     reset_pipeline();
     t = 1000000;
     for (int i = 0; i < 900; ++i) {
         t += NOMINAL_US;
         float j = (i % 11) * 0.0005f;
-        // 2.9 °/с проходит порог неподвижности 3, но выше потолка правдоподобия 5?
-        // Нет — берём три оси так, чтобы каждая была ниже 3, но проверяем сам
-        // механизм отказа отдельным потолком.
+        float g = (i % 100 == 0) ? 40.0f : 1.0f;
+        feed(true, 0.0f + j, 0.0f, 1.0f, g, 0.0f, 0.0f, 25.0f, t);
+    }
+    st = fc_imu_pipeline_stats();
+    check(st.residual_state == FC_IMU_RESIDUAL_COLLECTING, "измерение не завершено");
+    check(st.residual_restarts > 0, "накопление сбрасывалось при движении");
+    check(!fc_imu_pipeline_residual_ready(), "контур не стартует");
+
+    printf("\n\033[1mБольшой остаток помечается как несоответствие калибровки\033[0m\n");
+    reset_pipeline();
+    t = 1000000;
+    for (int i = 0; i < 900; ++i) {
+        t += NOMINAL_US;
+        float j = (i % 11) * 0.0005f;
+        // 2.9 °/с проходит порог неподвижности 3, но выше потолка остатка 2:
+        // постоянная калибровка явно не соответствует текущему датчику.
         feed(true, 0.0f + j, 0.0f, 1.0f, 2.9f, 2.9f, 2.9f, 25.0f, t);
     }
     st = fc_imu_pipeline_stats();
-    check(st.cal_state == FC_IMU_CAL_DONE, "смещение 2.9 °/с ниже потолка 5 — принято");
-    note("состояние: %s", fc_imu_cal_state_name(st.cal_state));
+    check(st.residual_state == FC_IMU_RESIDUAL_REJECTED, "остаток 2.9 °/с помечен как великий");
+    check(fc_imu_pipeline_residual_ready(), "контур всё же стартует: это не отказ, а предупреждение");
 }
 
 static void test_ahrs_signs(void) {
@@ -365,7 +370,7 @@ void test_imu_pipeline_all(void) {
     test_invalid_rejected();
     test_stale();
     test_skip_detection();
-    test_gyro_bias_calibration();
+    test_residual_bias();
     test_ahrs_signs();
     test_ahrs_config();
     test_ahrs_gyro_signs();

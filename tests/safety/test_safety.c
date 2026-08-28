@@ -21,6 +21,7 @@ int fc_test_checks = 0;
 void fc_test_check(bool ok, const char *what);
 void fc_test_note(const char *fmt, ...);
 void test_imu_pipeline_all(void);
+void test_imu_calibration_all(void);
 
 static void check(bool ok, const char *what) {
     ++g_checks;
@@ -64,6 +65,9 @@ static uint64_t bring_up(uint64_t t) {
     fc_supervisor_report_platform_ready(true, t);
     fc_supervisor_report_config_valid(true, t);
     fc_supervisor_report_watchdog(true, t);
+    // С v0.6E валидная калибровка ориентации — условие READY. Без неё
+    // платформа не знает, как датчик стоит относительно доски.
+    fc_supervisor_report_calibration_valid(true, t);
     fc_supervisor_report_footpad(false, t);
     fc_supervisor_report_imu_healthy(true, t);
     fc_supervisor_report_loop_tick(t);
@@ -93,6 +97,11 @@ static void test_states(void) {
     fc_supervisor_report_footpad(false, t);
     fc_supervisor_report_imu_healthy(true, t);
     fc_supervisor_report_loop_tick(t);
+    // Калибровка ориентации — такое же обязательное условие, как исправный
+    // IMU: без неё углы, которые платформа отдаёт Refloat, относятся к
+    // датчику, а не к доске (v0.6E).
+    check(!fc_supervisor_request_ready(t), "без калибровки READY всё ещё отклонён");
+    fc_supervisor_report_calibration_valid(true, t);
     check(fc_supervisor_request_ready(t), "DISARMED -> READY когда все условия выполнены");
     check(fc_supervisor_state() == FC_SUP_READY, "состояние READY");
 
@@ -366,6 +375,22 @@ static void test_build_profile(void) {
 #endif
 }
 
+static void test_calibration_required_for_ready(void) {
+    printf("\n\033[1mКалибровка ориентации как условие READY\033[0m\n");
+    uint64_t t = bring_up(1000000);
+    check(fc_supervisor_request_ready(t += 1000), "с калибровкой READY достижим");
+
+    // Потеря калибровки на ходу снимает готовность, но отказом не является.
+    fc_supervisor_report_calibration_valid(false, t += 1000);
+    check(fc_supervisor_state() == FC_SUP_DISARMED, "без калибровки READY снимается");
+    check(fc_supervisor_status().faults == 0, "это не отказ: маска отказов пуста");
+    check(!fc_supervisor_request_ready(t += 1000), "и обратно в READY уже не пускает");
+    check(!fc_supervisor_motor_output_permitted(), "выход на мотор запрещён");
+
+    fc_supervisor_report_calibration_valid(true, t += 1000);
+    check(fc_supervisor_request_ready(t += 1000), "после возврата калибровки READY снова достижим");
+}
+
 int main(void) {
     printf("\n\033[1mТесты ядра безопасности: Supervisor, Motor Gate, IMU health\033[0m\n");
     test_states();
@@ -375,7 +400,9 @@ int main(void) {
     test_no_output_in_any_state();
     test_imu_health();
     test_build_profile();
+    test_calibration_required_for_ready();
     test_imu_pipeline_all();
+    test_imu_calibration_all();
 
     printf("\n================================================================\n");
     if (g_fail == 0) {

@@ -8,6 +8,7 @@ idf_component_register(
         "fc_imu_mock.c"
         "fc_imu_rt.c"
         "fc_imu_source.c"
+        "fc_imu_cal_store.c"
         "fc_imu_stress.c"
         "fc_adc_safe.c"
         "fc_storage_nvs.c"
@@ -22,6 +23,8 @@ idf_component_register(
         "../../../compat/safety/fc_imu_health.c"
         "../../../compat/imu/fc_ahrs.c"
         "../../../compat/imu/fc_imu_pipeline.c"
+        "../../../compat/imu/fc_imu_calibration.c"
+        "../../../compat/imu/fc_imu_detect.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../compat/vesc_api"

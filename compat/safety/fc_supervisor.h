@@ -52,6 +52,16 @@ typedef struct {
     bool watchdog_healthy;   // TWDT не срабатывал
     bool footpad_engaged;    // доска активирована (не отказ, но не даёт READY)
 
+    // Ориентация датчика откалибрована и запись валидна (v0.6E).
+    //
+    // Условие READY, а не отказ. Обоснование: без калибровки платформа не
+    // знает, как датчик стоит относительно доски, и любой угол, который она
+    // отдаёт Refloat, — угол датчика, а не доски. Для балансирующей системы
+    // это означает, что и порог входа в RUNNING, и отказ по крену считаются
+    // не от того нуля. Отказом это не объявляется: некалиброванная плата не
+    // сломана, она просто не готова.
+    bool calibration_valid;
+
     // --- интерфейс под будущие этапы; на v0.6A всегда как ниже ----------
     bool esc_a_alive;        // false: ESC не подключён
     bool esc_b_alive;        // false
@@ -114,6 +124,7 @@ void fc_supervisor_report_config_valid(bool valid, uint64_t now_us);
 void fc_supervisor_report_platform_ready(bool ready, uint64_t now_us);
 void fc_supervisor_report_watchdog(bool healthy, uint64_t now_us);
 void fc_supervisor_report_footpad(bool engaged, uint64_t now_us);
+void fc_supervisor_report_calibration_valid(bool valid, uint64_t now_us);
 
 /** Немедленный отказ с указанной причиной. */
 void fc_supervisor_raise_fault(uint32_t fault_mask, uint64_t now_us);

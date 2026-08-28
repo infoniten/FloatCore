@@ -76,7 +76,8 @@ void fc_supervisor_self_test_result(bool passed, uint64_t now_us) {
 // а просто отказ в переходе.
 static bool ready_conditions_met(void) {
     return S.in.platform_initialized && S.in.config_valid && S.in.loop_alive &&
-           S.in.imu_healthy && S.in.watchdog_healthy && !S.in.footpad_engaged;
+           S.in.imu_healthy && S.in.watchdog_healthy && !S.in.footpad_engaged &&
+           S.in.calibration_valid;
 }
 
 bool fc_supervisor_request_ready(uint64_t now_us) {
@@ -135,6 +136,14 @@ void fc_supervisor_report_watchdog(bool healthy, uint64_t now_us) {
     S.in.watchdog_healthy = healthy;
     if (!healthy) {
         enter_fault(FC_FAULT_WATCHDOG, now_us);
+    }
+}
+
+void fc_supervisor_report_calibration_valid(bool valid, uint64_t now_us) {
+    S.in.calibration_valid = valid;
+    // Потеря калибровки не отказ, но и READY при ней удерживать нельзя.
+    if (!valid && S.state == FC_SUP_READY) {
+        transition(FC_SUP_DISARMED, now_us);
     }
 }
 

@@ -29,6 +29,7 @@
 #include "../../../compat/safety/fc_imu_health.h"
 #include "../../../compat/safety/fc_supervisor.h"
 #include "../drivers/icm20948.h"
+#include "fc_imu_cal_store.h"
 
 #include "esp_log.h"
 #include "esp_task_wdt.h"
@@ -109,7 +110,16 @@ static struct {
     volatile int stall_ms;
     float ahrs_kp;
     float ahrs_decay;
+    FcImuCalStatus cal_status;
 } R;
+
+int fc_imu_rt_cal_status(void) {
+    return (int) R.cal_status;
+}
+
+void fc_imu_rt_set_cal_status(int s) {
+    R.cal_status = (FcImuCalStatus) s;
+}
 
 // ------------------------------------------------------------------ доступ
 
@@ -237,20 +247,19 @@ static void imu_rt_task(void *arg) {
         fc_supervisor_report_loop_tick(sample.timestamp_us);
         fc_supervisor_report_imu_sample(sample.timestamp_us);
 
-        // Контур не запускается, пока не завершилась стартовая калибровка
-        // смещения гироскопа: до этого AHRS считает с некомпенсированным
-        // смещением, а супервизор из-за startup_done = false не может уйти в
-        // READY. Калибровка не проходит на движущейся доске и в этом случае
-        // просто продолжается — это осознанно: лучше не стартовать, чем
-        // стартовать с записанным как смещение реальным вращением.
+        // Контур не запускается, пока не измерен остаток смещения гироскопа.
+        // Само измерение ничего не компенсирует (постоянная калибровка уже
+        // всё вычла), но оно требует неподвижной доски — и тем самым остаётся
+        // единственной защитой от старта контура на движущейся доске.
         if (!R.startup_done && ++R.accepted_streak >= FC_IMU_RT_STARTUP_SAMPLES &&
-            fc_imu_pipeline_calibrated()) {
+            fc_imu_pipeline_residual_ready()) {
             R.startup_done = true;
             FcImuPipelineStats ps = fc_imu_pipeline_stats();
             ESP_LOGI(TAG,
-                     "IMU стабилен, калибровка %s: смещение %+.2f %+.2f %+.2f °/с, контур запущен",
-                     fc_imu_cal_state_name(ps.cal_state), (double) ps.gyro_bias_dps[0],
-                     (double) ps.gyro_bias_dps[1], (double) ps.gyro_bias_dps[2]);
+                     "IMU стабилен, остаток смещения %s: %+.2f %+.2f %+.2f °/с, контур запущен",
+                     fc_imu_residual_state_name(ps.residual_state),
+                     (double) ps.residual_bias_dps[0], (double) ps.residual_bias_dps[1],
+                     (double) ps.residual_bias_dps[2]);
         }
 
         void (*cb)(float *, float *, float *, float) = R.callback;
@@ -289,6 +298,20 @@ bool fc_imu_rt_start(void) {
     uint32_t nominal_us = 1000000u / FC_IMU_RT_CONTROL_HZ;
     FcImuPipelineConfig pc = fc_imu_pipeline_default_config(nominal_us);
     fc_imu_pipeline_init(&pc, &hc);
+
+    // Постоянная калибровка читается ОДИН раз при старте и применяется ко
+    // всему потоку. Автоматической калибровки при каждой загрузке нет
+    // намеренно: в штатной прошивке VESC её тоже нет, а измерять ориентацию
+    // при включении означало бы принимать за ноль то положение, в котором
+    // доску случайно оставили.
+    FcImuCalibration cal;
+    R.cal_status = fc_imu_cal_store_load(&cal);
+    fc_imu_pipeline_set_calibration(&cal);
+    ESP_LOGI(TAG, "калибровка: %s, поворот %+.2f %+.2f %+.2f град, смещения %+.3f %+.3f %+.3f °/с",
+             fc_imu_cal_status_name(R.cal_status), (double) cal.rot_roll_deg,
+             (double) cal.rot_pitch_deg, (double) cal.rot_yaw_deg,
+             (double) cal.gyro_offset_dps[0], (double) cal.gyro_offset_dps[1],
+             (double) cal.gyro_offset_dps[2]);
 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "ICM-20948 не инициализирован: %s (шаг: %s)", esp_err_to_name(err),

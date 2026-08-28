@@ -183,6 +183,9 @@ uint32_t fc_imu_rt_max_read_us(void);
 uint64_t fc_imu_rt_reinits(void);
 uint32_t fc_imu_rt_stack_watermark(void);
 void fc_imu_rt_inject_stall(int ms);
+// Статус постоянной калибровки (значения FcImuCalStatus из compat/imu).
+int fc_imu_rt_cal_status(void);
+void fc_imu_rt_set_cal_status(int s);
 
 uint64_t fc_uptime_us(void);
 

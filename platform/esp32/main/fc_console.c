@@ -26,6 +26,7 @@
 #include "../../../compat/imu/fc_imu_pipeline.h"
 #include "../drivers/icm20948.h"
 #include "fc_imu_source.h"
+#include "fc_imu_cal_store.h"
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -85,6 +86,8 @@ static void cmd_supervisor(void) {
            st.last_imu_sample_us ? (double) (now - st.last_imu_sample_us) / 1000.0 : -1.0);
     printf("  watchdog        %d\n", st.inputs.watchdog_healthy);
     printf("  footpad_engaged %d\n", st.inputs.footpad_engaged);
+    printf("  calibration     %d (%s)\n", st.inputs.calibration_valid,
+           fc_imu_cal_status_name((FcImuCalStatus) fc_imu_rt_cal_status()));
     printf("входы под будущие этапы (CAN ещё нет):\n");
     printf("  esc_a/esc_b     %d / %d\n", st.inputs.esc_a_alive, st.inputs.esc_b_alive);
     printf("  can_fresh       %d\n", st.inputs.can_fresh);
@@ -140,11 +143,11 @@ static void cmd_imu(void) {
            PRIu32 "\n",
            (unsigned long long) ps.read_failures, (unsigned long long) ps.suspected_skips,
            ps.max_consecutive_duplicates);
-    printf("калибровка gyro   %s, смещение %+.2f %+.2f %+.2f °/с (семплов %" PRIu32
-           ", перезапусков %" PRIu32 ")\n",
-           fc_imu_cal_state_name(ps.cal_state), (double) ps.gyro_bias_dps[0],
-           (double) ps.gyro_bias_dps[1], (double) ps.gyro_bias_dps[2], ps.cal_samples,
-           ps.cal_restarts);
+    printf("остаток смещения  %s: %+.3f %+.3f %+.3f °/с (семплов %" PRIu32 ", перезапусков %"
+           PRIu32 ")\n",
+           fc_imu_residual_state_name(ps.residual_state), (double) ps.residual_bias_dps[0],
+           (double) ps.residual_bias_dps[1], (double) ps.residual_bias_dps[2],
+           ps.residual_samples, ps.residual_restarts);
     if (ps.gaps_counted) {
         printf("                  интервал между принятыми: mean %.0f, min %llu, max %llu мкс\n",
                (double) ps.sum_gap_us / (double) ps.gaps_counted,
@@ -156,9 +159,16 @@ static void cmd_imu(void) {
                           sm.accel_g[2] * sm.accel_g[2]);
         printf("семпл #%" PRIu32 "        возраст %.1f мс, dt %.0f мкс\n", sm.sample_counter,
                (double) (now - sm.timestamp_us) / 1000.0, (double) sm.dt_s * 1e6);
-        printf("  raw accel       %+7.3f %+7.3f %+7.3f g  |a|=%.3f\n", (double) sm.accel_g[0],
+        float rmag = sqrtf(sm.accel_raw_g[0] * sm.accel_raw_g[0] +
+                           sm.accel_raw_g[1] * sm.accel_raw_g[1] +
+                           sm.accel_raw_g[2] * sm.accel_raw_g[2]);
+        printf("  raw accel       %+7.3f %+7.3f %+7.3f g  |a|=%.3f\n", (double) sm.accel_raw_g[0],
+               (double) sm.accel_raw_g[1], (double) sm.accel_raw_g[2], (double) rmag);
+        printf("  raw gyro        %+8.2f %+8.2f %+8.2f °/с\n", (double) sm.gyro_raw_dps[0],
+               (double) sm.gyro_raw_dps[1], (double) sm.gyro_raw_dps[2]);
+        printf("  cal accel       %+7.3f %+7.3f %+7.3f g  |a|=%.3f\n", (double) sm.accel_g[0],
                (double) sm.accel_g[1], (double) sm.accel_g[2], (double) mag);
-        printf("  raw gyro        %+8.2f %+8.2f %+8.2f °/с   (%+7.4f %+7.4f %+7.4f рад/с)\n",
+        printf("  cal gyro        %+8.2f %+8.2f %+8.2f °/с   (%+7.4f %+7.4f %+7.4f рад/с)\n",
                (double) sm.gyro_dps[0], (double) sm.gyro_dps[1], (double) sm.gyro_dps[2],
                (double) sm.gyro_rad_s[0], (double) sm.gyro_rad_s[1], (double) sm.gyro_rad_s[2]);
         printf("  температура     %.1f °C\n", (double) sm.temperature_c);
@@ -245,6 +255,44 @@ static void cmd_i2cscan(void) {
                    cfg.i2c_addr, found[i]);
             printf("      что вывод AD0 подтянут к питанию, а не к земле\n");
         }
+    }
+}
+
+// Показать текущую калибровку. SAFE_READONLY: только чтение состояния.
+static void cmd_imu_cal_show(void) {
+    FcImuCalibration c = fc_imu_pipeline_calibration();
+    FcDetectStatus d = fc_imu_detect_status();
+    printf("статус            %s\n", fc_imu_cal_status_name((FcImuCalStatus) fc_imu_rt_cal_status()));
+    printf("поворот           roll %+8.3f  pitch %+8.3f  yaw %+8.3f град\n",
+           (double) c.rot_roll_deg, (double) c.rot_pitch_deg, (double) c.rot_yaw_deg);
+    printf("смещения gyro     %+8.3f %+8.3f %+8.3f °/с (в повёрнутой системе)\n",
+           (double) c.gyro_offset_dps[0], (double) c.gyro_offset_dps[1],
+           (double) c.gyro_offset_dps[2]);
+    printf("смещения accel    %+8.3f %+8.3f %+8.3f g (на v0.6E не измеряются)\n",
+           (double) c.accel_offset_g[0], (double) c.accel_offset_g[1],
+           (double) c.accel_offset_g[2]);
+    printf("порядок           поворот -> вычитание смещений -> AHRS и Refloat\n");
+    printf("измерение         %s", fc_imu_detect_state_name(d.state));
+    if (d.state == FC_DETECT_COLLECTING) {
+        printf(", накоплено %" PRIu32 " из %" PRIu32 ", сбросов %" PRIu32, d.samples, d.needed,
+               d.restarts);
+    }
+    if (d.failure != FC_DETECT_FAIL_NONE) {
+        printf(", последняя помеха: %s", fc_imu_detect_failure_name(d.failure));
+    }
+    printf("\n");
+    if (d.state == FC_DETECT_DONE) {
+        printf("найдено (НЕ сохранено): roll %+8.3f  pitch %+8.3f  yaw %+8.3f град\n",
+               (double) d.result.rot_roll_deg, (double) d.result.rot_pitch_deg,
+               (double) d.result.rot_yaw_deg);
+        printf("                        смещения %+8.3f %+8.3f %+8.3f °/с\n",
+               (double) d.result.gyro_offset_dps[0], (double) d.result.gyro_offset_dps[1],
+               (double) d.result.gyro_offset_dps[2]);
+        printf("качество                СКО gyro %.3f %.3f %.3f °/с, accel %.4f %.4f %.4f g\n",
+               (double) d.gyro_std_dps[0], (double) d.gyro_std_dps[1], (double) d.gyro_std_dps[2],
+               (double) d.accel_std_g[0], (double) d.accel_std_g[1], (double) d.accel_std_g[2]);
+        printf("                        |a| = %.4f g\n", (double) d.accel_mag_g);
+        printf("сохранить:              imu-cal-save\n");
     }
 }
 
@@ -538,6 +586,75 @@ static void cmd_footpad_sim(bool on) {
     }
 }
 
+// Detect / Save / Clear калибровки (ТЗ v0.6E §12).
+//
+// Detect и Save разделены намеренно: измерение ничего не записывает во flash,
+// и человек видит результат до того, как он станет постоянным.
+static void cmd_imu_cal_detect(const char *arg) {
+    float yaw = 0.0f;
+    if (arg && *arg) {
+        yaw = strtof(arg, NULL);
+    }
+    if (!fc_imu_rt_available()) {
+        printf("imu-cal-detect: датчик не поднят\n");
+        return;
+    }
+    FcDetectConfig cfg = fc_imu_detect_default_config();
+    fc_imu_detect_start(&cfg, yaw);
+    printf("imu-cal-detect: измерение начато, %" PRIu32 " семплов (около %.1f с при 500 Гц)\n",
+           cfg.samples, (double) cfg.samples / 500.0);
+    printf("  Держите доску НЕПОДВИЖНО в том положении, которое считается ровным.\n");
+    printf("  Любое движение сбрасывает накопление — измерение просто не завершится.\n");
+    printf("  rot_yaw = %+.1f град (задаётся аргументом, акселерометром не измеряется)\n",
+           (double) yaw);
+    printf("  Результат посмотреть: imu-cal-show. Записать: imu-cal-save\n");
+}
+
+static void cmd_imu_cal_save(void) {
+    FcDetectStatus d = fc_imu_detect_status();
+    if (d.state != FC_DETECT_DONE) {
+        printf("imu-cal-save: нечего сохранять, измерение в состоянии %s\n",
+               fc_imu_detect_state_name(d.state));
+        return;
+    }
+    if (!fc_supervisor_config_write_allowed()) {
+        printf("imu-cal-save: ОТКЛОНЕНО, запись разрешена только в DISARMED (сейчас %s)\n",
+               fc_supervisor_state_name(fc_supervisor_state()));
+        return;
+    }
+    if (!fc_imu_cal_store_save(&d.result)) {
+        printf("imu-cal-save: запись не удалась\n");
+        return;
+    }
+    // Применяем сразу: иначе человек увидит эффект только после перезагрузки и
+    // не сможет проверить результат тем же прогоном.
+    fc_imu_pipeline_set_calibration(&d.result);
+    fc_imu_pipeline_reset_ahrs();
+    fc_imu_rt_set_cal_status((int) FC_IMU_CAL_VALID);
+    printf("imu-cal-save: записано и применено. Фильтр ориентации перезапущен.\n");
+    printf("  roll %+8.3f  pitch %+8.3f  yaw %+8.3f град\n", (double) d.result.rot_roll_deg,
+           (double) d.result.rot_pitch_deg, (double) d.result.rot_yaw_deg);
+}
+
+static void cmd_imu_cal_clear(void) {
+    if (!fc_supervisor_config_write_allowed()) {
+        printf("imu-cal-clear: ОТКЛОНЕНО, запись разрешена только в DISARMED (сейчас %s)\n",
+               fc_supervisor_state_name(fc_supervisor_state()));
+        return;
+    }
+    if (!fc_imu_cal_store_clear()) {
+        printf("imu-cal-clear: стирание не удалось\n");
+        return;
+    }
+    FcImuCalibration id = fc_imu_calibration_identity();
+    fc_imu_pipeline_set_calibration(&id);
+    fc_imu_pipeline_reset_ahrs();
+    fc_imu_rt_set_cal_status((int) FC_IMU_CAL_NOT_CALIBRATED);
+    fc_imu_detect_abort();
+    printf("imu-cal-clear: калибровка стёрта, применена единичная.\n");
+    printf("  Статус NOT_CALIBRATED — READY теперь недостижим до новой калибровки.\n");
+}
+
 static void cmd_imu_fail(void) {
     printf("imu-fail: следующие 500 чтений ICM-20948 завершатся ошибкой\n");
     printf("  ожидается: health READ_ERROR -> supervisor FAULT (IMU_UNHEALTHY)\n");
@@ -554,13 +671,14 @@ static void cmd_imu_freeze(void) {
 
 static void cmd_help(void) {
     printf("диагностика (read-only): status | supervisor | imu | i2cscan | timing | timing-hist |\n");
-    printf("                         tasks | heap | config | safety | help\n");
+    printf("                         tasks | heap | config | safety | imu-cal-show | help\n");
 #if FC_LAB_DIAGNOSTICS
     printf("меняют состояние:        ready | disarm | fault-clear | persist | timing-reset |\n");
     printf("                         restart\n");
     printf("проверка защит:          wdtest-confirm | crashtest-confirm | imu-fail-confirm |\n");
     printf("                         imu-freeze-confirm | imu-stop-confirm | imu-start\n");
     printf("                         footpad-sim-confirm | footpad-sim-off\n");
+    printf("калибровка IMU:          imu-cal-detect [yaw] | imu-cal-save | imu-cal-clear\n");
     printf("стресс-тест шины I2C:    imu_stress [сек] [кГц] [порог_сброса] | imu_stress-stop |\n");
     printf("                         imu_stress-log\n");
 #endif
@@ -580,6 +698,8 @@ static void dispatch(const char *line) {
         cmd_tasks();
     } else if (!strcmp(line, "i2cscan")) {
         cmd_i2cscan();
+    } else if (!strcmp(line, "imu-cal-show")) {
+        cmd_imu_cal_show();
     } else if (!strcmp(line, "timing")) {
         cmd_timing();
     } else if (!strcmp(line, "timing-hist")) {
@@ -615,6 +735,13 @@ static void dispatch(const char *line) {
         cmd_imu_fail();
     } else if (!strcmp(line, "imu-freeze-confirm")) {
         cmd_imu_freeze();
+    } else if (!strncmp(line, "imu-cal-detect", 14) &&
+               (line[14] == 0 || line[14] == ' ')) {
+        cmd_imu_cal_detect(line[14] == ' ' ? line + 15 : NULL);
+    } else if (!strcmp(line, "imu-cal-save")) {
+        cmd_imu_cal_save();
+    } else if (!strcmp(line, "imu-cal-clear")) {
+        cmd_imu_cal_clear();
     } else if (!strcmp(line, "footpad-sim-confirm")) {
         cmd_footpad_sim(true);
     } else if (!strcmp(line, "footpad-sim-off")) {

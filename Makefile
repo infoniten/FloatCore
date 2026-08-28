@@ -203,7 +203,7 @@ host: $(HOST_BIN)
 # host в том же профиле LAB_SAFE, что и прошивка.
 
 SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(wildcard $(ROOT)/compat/imu/*.c) \
-              $(ROOT)/tests/safety/test_safety.c $(ROOT)/tests/imu/test_imu_pipeline.c
+              $(ROOT)/tests/safety/test_safety.c $(wildcard $(ROOT)/tests/imu/*.c)
 SAFETY_OBJ := $(patsubst %,$(OBJ)/saf_%.o,$(notdir $(basename $(SAFETY_SRC))))
 SAFETY_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_LAB_SAFE=1
 
