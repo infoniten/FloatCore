@@ -25,6 +25,7 @@
 #define FC_PRIO_SUPERVISOR 15 // выше контура: обязан отработать при перегрузке
 #define FC_PRIO_CONSOLE 4     // read-only CLI, ядро 0
 #define FC_PRIO_IMU_STRESS 5  // стресс-тест шины I2C, ядро 0 (см. fc_imu_stress.c)
+#define FC_PRIO_CAN_RX 6      // пассивный приём CAN, ядро 0 (см. fc_can_passive.c)
 
 // Refloat просит 1536 байт стека — этого мало для Xtensa (docs/vesc_if_contract.md §2).
 #define FC_STACK_SCALE 8

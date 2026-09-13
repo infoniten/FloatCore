@@ -60,3 +60,27 @@
 #endif
 
 #endif
+
+// --------------------------------------------- профиль шины CAN (v0.7A)
+//
+// Ортогонален профилю сборки и задаётся отдельно. Смысл тот же: не «флаг,
+// который можно переключить», а наличие или отсутствие кода.
+//
+//   FLOATCORE_CAN_PASSIVE   слушать шину и только слушать. Контроллер TWAI
+//                           поднимается в listen-only, функции передачи не
+//                           объявлены и не определены нигде в сборке.
+//   (не задан)              CAN отсутствует полностью, как было до v0.7A.
+//
+// Активный профиль появится отдельным этапом и обязан быть несовместим с
+// LAB_SAFE: строка ниже это и обеспечивает.
+#if defined(FLOATCORE_CAN_PASSIVE) && FC_CAN_TX_AVAILABLE
+#error "FLOATCORE_CAN_PASSIVE несовместим с профилем, где разрешена передача в CAN"
+#endif
+
+#ifdef FLOATCORE_CAN_PASSIVE
+#define FC_CAN_PROFILE_NAME "PASSIVE (listen-only)"
+#define FC_CAN_RX_AVAILABLE 1
+#else
+#define FC_CAN_PROFILE_NAME "ABSENT"
+#define FC_CAN_RX_AVAILABLE 0
+#endif

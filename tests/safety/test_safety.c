@@ -22,6 +22,7 @@ void fc_test_check(bool ok, const char *what);
 void fc_test_note(const char *fmt, ...);
 void test_imu_pipeline_all(void);
 void test_imu_calibration_all(void);
+void test_can_all(void);
 
 static void check(bool ok, const char *what) {
     ++g_checks;
@@ -403,6 +404,7 @@ int main(void) {
     test_calibration_required_for_ready();
     test_imu_pipeline_all();
     test_imu_calibration_all();
+    test_can_all();
 
     printf("\n================================================================\n");
     if (g_fail == 0) {

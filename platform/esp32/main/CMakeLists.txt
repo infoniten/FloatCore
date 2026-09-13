@@ -15,6 +15,7 @@ idf_component_register(
         "fc_timing.c"
         "fc_console.c"
         "fc_can_absent.c"
+        "fc_can_passive.c"
         "fc_supervisor_task.c"
         "fc_safety_report.c"
         "../drivers/icm20948.c"
@@ -25,14 +26,20 @@ idf_component_register(
         "../../../compat/imu/fc_imu_pipeline.c"
         "../../../compat/imu/fc_imu_calibration.c"
         "../../../compat/imu/fc_imu_detect.c"
+        "../../../compat/can/fc_vesc_can.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../compat/vesc_api"
         "${CMAKE_CURRENT_LIST_DIR}/../../../compat/safety"
     REQUIRES refloat nvs_flash esp_timer esp_app_format spi_flash esp_hw_support hal soc driver
-             esp_system esp_driver_i2c
+             esp_system esp_driver_i2c driver
 )
 
 # Профиль сборки — свойство двоичного файла, а не настройка во время работы.
 # На этапах v0.5–v0.6x собирается только лабораторный профиль.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_LAB_SAFE=1)
+
+# Профиль шины CAN. PASSIVE означает listen-only и полное отсутствие функций
+# передачи в сборке (ТЗ v0.7A §6). Активный профиль появится отдельным этапом
+# и с LAB_SAFE несовместим по построению — см. fc_build_profile.h.
+target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_CAN_PASSIVE=1)

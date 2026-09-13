@@ -61,7 +61,7 @@ HOST_TESTS_BIN := $(BIN)/refloat_host_tests
 PROTO_TESTS_BIN := $(BIN)/protocol_tests
 HOST_BIN := $(BIN)/floatcore_host
 
-.PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32 safety-tests
+.PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32 safety-tests can-negative-test
 
 all: $(HOST_TESTS_BIN) $(PROTO_TESTS_BIN) $(HOST_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN)
 
@@ -193,7 +193,7 @@ test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN
 integration: $(HOST_BIN)
 	$(ROOT)/tests/host_integration/run.sh
 
-test-all: test integration
+test-all: test integration can-negative-test
 
 host: $(HOST_BIN)
 	$(HOST_BIN) $(ARGS)
@@ -203,9 +203,11 @@ host: $(HOST_BIN)
 # host в том же профиле LAB_SAFE, что и прошивка.
 
 SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(wildcard $(ROOT)/compat/imu/*.c) \
-              $(ROOT)/tests/safety/test_safety.c $(wildcard $(ROOT)/tests/imu/*.c)
+              $(wildcard $(ROOT)/compat/can/*.c) \
+              $(ROOT)/tests/safety/test_safety.c $(wildcard $(ROOT)/tests/imu/*.c) \
+              $(ROOT)/tests/can/test_can.c
 SAFETY_OBJ := $(patsubst %,$(OBJ)/saf_%.o,$(notdir $(basename $(SAFETY_SRC))))
-SAFETY_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_LAB_SAFE=1
+SAFETY_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_PASSIVE=1
 
 $(OBJ)/saf_%.o: $(ROOT)/compat/safety/%.c
 	@mkdir -p $(OBJ)
@@ -223,11 +225,35 @@ $(OBJ)/saf_%.o: $(ROOT)/tests/imu/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 
+$(OBJ)/saf_%.o: $(ROOT)/compat/can/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/saf_%.o: $(ROOT)/tests/can/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
 $(SAFETY_TESTS_BIN): $(SAFETY_OBJ)
 	@mkdir -p $(BIN)
 	$(CC) $^ -lm -o $@
 
 safety-tests: $(SAFETY_TESTS_BIN)
+
+# ---------------------------------- негативный тест компиляции CAN TX (v0.7A)
+#
+# Успех цели — это ПРОВАЛ компиляции. Формулировка неочевидная, поэтому цель
+# вынесена отдельно и печатает, что именно проверяется: в пассивном профиле
+# обращение к функции передачи обязано не собираться.
+can-negative-test:
+	@echo "негативный тест: вызов CAN TX в пассивном профиле НЕ должен компилироваться"
+	@if $(CC) $(CSTD) -DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_PASSIVE=1 \
+	        -c $(ROOT)/tests/can/negative_tx.c -o /dev/null 2>$(BIN)/can_negative.log; then \
+	    echo "      \033[31mFAIL\033[0m файл собрался — путь передачи в CAN существует"; \
+	    exit 1; \
+	else \
+	    echo "      \033[32mPASS\033[0m компиляция отклонена:"; \
+	    grep -m2 -iE "poison|implicit|undeclared" $(BIN)/can_negative.log | sed 's/^/            /'; \
+	fi
 
 # ------------------------------------------------- тесты платформы ESP32 (host)
 # Модули platform/esp32/main собираются поверх заглушек tests/esp32/stubs:

@@ -13,6 +13,7 @@
 
 #include "fc_platform.h"
 #include "fc_imu_source.h"
+#include "fc_can_passive.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
 #include "../../../compat/safety/fc_build_profile.h"
 #include "../../../compat/safety/fc_imu_health.h"
@@ -148,6 +149,7 @@ static void print_banner(uint32_t boot_count) {
     printf("motor:       backend %s, выход запрещён политикой супервизора\n",
            fc_motor_gate_backend_name());
     printf("can:         %s\n", fc_can_backend_name());
+    printf("can profile: %s\n", FC_CAN_PROFILE_NAME);
     // Источник контура. Печатается до его запуска, поэтому берётся константа
     // сборки, а не текущее состояние: иначе баннер сообщал бы «mock» просто
     // потому, что реальный датчик ещё не поднимали.
@@ -275,6 +277,16 @@ void app_main(void) {
     printf("[floatcore] физический IMU: %s\n",
            imu_hw ? "ICM-20948 инициализирован, задаёт ритм контура"
                   : "НЕ обнаружен — контур НЕ ЗАПУЩЕН, подмены на mock нет");
+
+    // 4. Пассивный приём CAN. Только слушает: функций передачи в этой сборке
+    //    не существует, а контроллер поднят в listen-only, где передатчик
+    //    отключён аппаратно (обоснование — fc_can_passive.h).
+#if FC_CAN_RX_AVAILABLE
+    bool can_rx = fc_can_passive_start();
+    printf("[floatcore] CAN: %s\n",
+           can_rx ? "TWAI listen-only поднят, приём идёт"
+                  : "TWAI НЕ поднялся — приём отсутствует");
+#endif
 
     // 5. Настоящий Refloat. Тот же init(), что и на VESC: refloat_facade_start()
     //    подставляет lib_info.arg и вызывает refloat_init().

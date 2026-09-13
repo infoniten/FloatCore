@@ -27,6 +27,8 @@
 #include "../drivers/icm20948.h"
 #include "fc_imu_source.h"
 #include "fc_imu_cal_store.h"
+#include "fc_can_passive.h"
+#include "../../../compat/can/fc_vesc_can.h"
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -295,6 +297,87 @@ static void cmd_imu_cal_show(void) {
         printf("сохранить:              imu-cal-save\n");
     }
 }
+
+#if FC_CAN_RX_AVAILABLE
+// Сводка по шине CAN. SAFE_READONLY: только чтение счётчиков.
+//
+// Каждый кадр в UART намеренно НЕ печатается: при 100 кадрах/с это сломало бы
+// тайминг вывода и ничего бы не дало. Здесь агрегаты, а последние кадры — в
+// отдельной команде can-frames.
+static void cmd_can(void) {
+    FcCanStats s = fc_can_passive_stats();
+    uint64_t now = fc_uptime_us();
+    double secs = s.started_us ? (double) (now - s.started_us) * 1e-6 : 0.0;
+
+    printf("профиль CAN       %s\n", FC_CAN_PROFILE_NAME);
+    printf("транспорт мотору  %s\n", fc_can_backend_name());
+    printf("контроллер        %s, приём %s\n", fc_can_bus_state_name(s.bus_state),
+           fc_can_passive_running() ? "запущен" : "не запущен");
+    printf("кадров            всего %llu за %.1f с (%.1f/с)\n",
+           (unsigned long long) s.frames_total, secs,
+           secs > 0 ? (double) s.frames_total / secs : 0.0);
+    printf("                  стандартных %llu, расширенных %llu, RTR %llu\n",
+           (unsigned long long) s.frames_std, (unsigned long long) s.frames_ext,
+           (unsigned long long) s.frames_rtr);
+    printf("очередь/ошибки    в очереди %" PRIu32 ", потеряно %" PRIu32 ", переполнений %" PRIu32
+           "\n", s.msgs_to_rx, s.rx_missed, s.rx_overrun);
+    printf("                  ошибок шины %" PRIu32 ", потерь арбитража %" PRIu32
+           ", неудач передачи %" PRIu32 ", ошибок приёма %llu\n",
+           s.bus_error_count, s.arb_lost_count, s.tx_failed_count,
+           (unsigned long long) s.receive_errors);
+    if (s.last_frame_us) {
+        printf("последний кадр    %.1f мс назад\n", (double) (now - s.last_frame_us) / 1000.0);
+    } else {
+        printf("последний кадр    НЕ ПОЛУЧЕН НИ ОДНОГО\n");
+    }
+
+    printf("DLC:             ");
+    for (int i = 0; i <= 8; ++i) {
+        if (s.dlc_hist[i]) {
+            printf(" %d:%llu", i, (unsigned long long) s.dlc_hist[i]);
+        }
+    }
+    printf("\n");
+
+    printf("идентификаторы (%" PRIu32 "%s):\n", s.id_count,
+           s.ids_overflow ? ", таблица переполнена" : "");
+    for (uint32_t i = 0; i < s.id_count; ++i) {
+        const FcCanIdStat *d = &s.ids[i];
+        FcVescCanId v = fc_vesc_can_decode(d->id, d->extended);
+        printf("  0x%08" PRIx32 " %s n=%-7llu dlc=%" PRIu32 " %6.1f/с  ", d->id,
+               d->extended ? "ext" : "std", (unsigned long long) d->count, d->last_dlc,
+               secs > 0 ? (double) d->count / secs : 0.0);
+        if (!v.vesc_format) {
+            printf("НЕ формат VESC");
+        } else if (v.known_type) {
+            printf("VESC id=%-3u %-24s%s", v.controller_id, v.name,
+                   v.is_motor_command ? " <-- КОМАНДА МОТОРУ" : "");
+        } else {
+            printf("VESC id=%-3u тип %-3" PRIu32 " UNKNOWN        ", v.controller_id,
+                   v.packet_type);
+        }
+        printf("  ");
+        for (uint32_t b = 0; b < d->last_dlc && b < 8; ++b) {
+            printf("%02x ", d->last_data[b]);
+        }
+        printf("\n");
+    }
+}
+
+static void cmd_can_frames(void) {
+    static FcCanFrame f[FC_CAN_RING];
+    uint32_t n = fc_can_passive_ring(f, FC_CAN_RING);
+    printf("последние %" PRIu32 " кадров (новейший внизу):\n", n);
+    for (uint32_t i = 0; i < n; ++i) {
+        printf("  %10llu us  0x%08" PRIx32 " %s%s dlc=%u ", (unsigned long long) f[i].t_us,
+               f[i].id, f[i].extended ? "ext" : "std", f[i].rtr ? " RTR" : "", f[i].dlc);
+        for (uint32_t b = 0; b < f[i].dlc; ++b) {
+            printf("%02x ", f[i].data[b]);
+        }
+        printf("\n");
+    }
+}
+#endif
 
 static void cmd_tasks(void) {
     printf("задачи FloatCore:\n");
@@ -590,6 +673,29 @@ static void cmd_footpad_sim(bool on) {
 //
 // Detect и Save разделены намеренно: измерение ничего не записывает во flash,
 // и человек видит результат до того, как он станет постоянным.
+#if FC_CAN_RX_AVAILABLE
+// Остановка и запуск приёма CAN. STATE_CHANGING, но физически безопасна:
+// останавливается только приём, а передачи в этой сборке не существует вовсе.
+// Нужна для того, чтобы приписать изменение тайминга именно приёму CAN, а не
+// предполагать это: один и тот же двоичный файл измеряется с приёмом и без.
+static void cmd_can_stop(void) {
+    if (!fc_can_passive_running()) {
+        printf("can-stop: приём и так не запущен\n");
+        return;
+    }
+    fc_can_passive_stop();
+    printf("can-stop: приём остановлен, драйвер TWAI выгружен\n");
+}
+
+static void cmd_can_start(void) {
+    if (fc_can_passive_running()) {
+        printf("can-start: приём уже идёт\n");
+        return;
+    }
+    printf("can-start: %s\n", fc_can_passive_start() ? "приём запущен" : "TWAI не поднялся");
+}
+#endif
+
 static void cmd_imu_cal_detect(const char *arg) {
     float yaw = 0.0f;
     if (arg && *arg) {
@@ -672,6 +778,9 @@ static void cmd_imu_freeze(void) {
 static void cmd_help(void) {
     printf("диагностика (read-only): status | supervisor | imu | i2cscan | timing | timing-hist |\n");
     printf("                         tasks | heap | config | safety | imu-cal-show | help\n");
+#if FC_CAN_RX_AVAILABLE
+    printf("шина CAN (только приём): can | can-frames | can-reset\n");
+#endif
 #if FC_LAB_DIAGNOSTICS
     printf("меняют состояние:        ready | disarm | fault-clear | persist | timing-reset |\n");
     printf("                         restart\n");
@@ -679,6 +788,9 @@ static void cmd_help(void) {
     printf("                         imu-freeze-confirm | imu-stop-confirm | imu-start\n");
     printf("                         footpad-sim-confirm | footpad-sim-off\n");
     printf("калибровка IMU:          imu-cal-detect [yaw] | imu-cal-save | imu-cal-clear\n");
+#if FC_CAN_RX_AVAILABLE
+    printf("приём CAN:               can-stop | can-start\n");
+#endif
     printf("стресс-тест шины I2C:    imu_stress [сек] [кГц] [порог_сброса] | imu_stress-stop |\n");
     printf("                         imu_stress-log\n");
 #endif
@@ -696,6 +808,15 @@ static void dispatch(const char *line) {
         cmd_imu();
     } else if (!strcmp(line, "tasks")) {
         cmd_tasks();
+#if FC_CAN_RX_AVAILABLE
+    } else if (!strcmp(line, "can")) {
+        cmd_can();
+    } else if (!strcmp(line, "can-frames")) {
+        cmd_can_frames();
+    } else if (!strcmp(line, "can-reset")) {
+        fc_can_passive_reset_stats();
+        printf("can: статистика обнулена\n");
+#endif
     } else if (!strcmp(line, "i2cscan")) {
         cmd_i2cscan();
     } else if (!strcmp(line, "imu-cal-show")) {
@@ -738,6 +859,12 @@ static void dispatch(const char *line) {
     } else if (!strncmp(line, "imu-cal-detect", 14) &&
                (line[14] == 0 || line[14] == ' ')) {
         cmd_imu_cal_detect(line[14] == ' ' ? line + 15 : NULL);
+#if FC_CAN_RX_AVAILABLE
+    } else if (!strcmp(line, "can-stop")) {
+        cmd_can_stop();
+    } else if (!strcmp(line, "can-start")) {
+        cmd_can_start();
+#endif
     } else if (!strcmp(line, "imu-cal-save")) {
         cmd_imu_cal_save();
     } else if (!strcmp(line, "imu-cal-clear")) {
