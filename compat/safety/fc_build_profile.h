@@ -61,26 +61,57 @@
 
 #endif
 
-// --------------------------------------------- профиль шины CAN (v0.7A)
+// ------------------------------------ профиль шины CAN (v0.7A, v0.7B)
 //
 // Ортогонален профилю сборки и задаётся отдельно. Смысл тот же: не «флаг,
 // который можно переключить», а наличие или отсутствие кода.
 //
-//   FLOATCORE_CAN_PASSIVE   слушать шину и только слушать. Контроллер TWAI
-//                           поднимается в listen-only, функции передачи не
-//                           объявлены и не определены нигде в сборке.
-//   (не задан)              CAN отсутствует полностью, как было до v0.7A.
+//   (не задан)               CAN отсутствует полностью, как было до v0.7A.
+//   FLOATCORE_CAN_PASSIVE    слушать шину и только слушать. Контроллер TWAI
+//                            поднимается в listen-only, ни одной функции
+//                            передачи в сборке нет.
+//   FLOATCORE_CAN_ACTIVE_DIAG  v0.7B: TWAI в normal mode, разрешена передача
+//                            СТРОГО перечисленных read-only запросов. Ни
+//                            одного типа пакета, способного повлиять на
+//                            мотор или изменить конфигурацию VESC, в этом
+//                            профиле собрать нельзя.
 //
-// Активный профиль появится отдельным этапом и обязан быть несовместим с
-// LAB_SAFE: строка ниже это и обеспечивает.
+// Три уровня передачи различаются намеренно и НЕ сводятся к одному флагу:
+//
+//   FC_CAN_RX_AVAILABLE       приём кадров
+//   FC_CAN_DIAG_TX_AVAILABLE  передача read-only запросов из белого списка
+//   FC_CAN_TX_AVAILABLE       транспорт команд мотору — только MOTOR_CAPABLE
+//
+// Именно поэтому ACTIVE_DIAG не переиспользует FC_CAN_TX_AVAILABLE: этот
+// макрос означает «мотору можно послать команду», и он обязан оставаться
+// нулём весь v0.7B. Отравление имён ниже привязано к нему же, поэтому в
+// диагностическом профиле обобщённые функции отправки остаются запрещёнными.
+#if defined(FLOATCORE_CAN_PASSIVE) && defined(FLOATCORE_CAN_ACTIVE_DIAG)
+#error "FLOATCORE_CAN_PASSIVE и FLOATCORE_CAN_ACTIVE_DIAG взаимоисключающи"
+#endif
+
 #if defined(FLOATCORE_CAN_PASSIVE) && FC_CAN_TX_AVAILABLE
 #error "FLOATCORE_CAN_PASSIVE несовместим с профилем, где разрешена передача в CAN"
+#endif
+
+#if defined(FLOATCORE_CAN_ACTIVE_DIAG) && FC_CAN_TX_AVAILABLE
+#error "FLOATCORE_CAN_ACTIVE_DIAG несовместим с транспортом команд мотору"
+#endif
+
+#if defined(FLOATCORE_CAN_ACTIVE_DIAG) && FC_MOTOR_BACKEND_AVAILABLE
+#error "FLOATCORE_CAN_ACTIVE_DIAG несовместим с backend-ом выхода на мотор"
 #endif
 
 #ifdef FLOATCORE_CAN_PASSIVE
 #define FC_CAN_PROFILE_NAME "PASSIVE (listen-only)"
 #define FC_CAN_RX_AVAILABLE 1
+#define FC_CAN_DIAG_TX_AVAILABLE 0
+#elif defined(FLOATCORE_CAN_ACTIVE_DIAG)
+#define FC_CAN_PROFILE_NAME "ACTIVE_DIAG (normal mode, read-only requests)"
+#define FC_CAN_RX_AVAILABLE 1
+#define FC_CAN_DIAG_TX_AVAILABLE 1
 #else
 #define FC_CAN_PROFILE_NAME "ABSENT"
 #define FC_CAN_RX_AVAILABLE 0
+#define FC_CAN_DIAG_TX_AVAILABLE 0
 #endif

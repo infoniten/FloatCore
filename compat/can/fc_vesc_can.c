@@ -65,6 +65,18 @@ static const char *const NAMES[] = {
     [56] = "POLL_ROTOR_POS",
     [57] = "NOTIFY_BOOT",
     [58] = "STATUS_6",
+    // Номера 59…68 добавлены на v0.7B: на стенде стоит прошивка 6.6, и в её
+    // datatypes.h перечисление длиннее того, что было учтено на v0.7A.
+    [59] = "GNSS_TIME",
+    [60] = "GNSS_LAT",
+    [61] = "GNSS_LON",
+    [62] = "GNSS_ALT_SPEED_HDOP",
+    [63] = "UPDATE_BAUD",
+    [64] = "BMS_STATUS_1",
+    [65] = "BMS_STATUS_2",
+    [66] = "BMS_STATUS_3",
+    [67] = "BMS_STATUS_4",
+    [68] = "BMS_STATUS_5",
 };
 
 #define NAMES_COUNT (sizeof(NAMES) / sizeof(NAMES[0]))
@@ -79,7 +91,7 @@ const char *fc_vesc_can_type_name(uint32_t packet_type) {
 // Типы, способные задать выход на мотор. Перечислены явно, а не выведены по
 // префиксу имени: список нужен для диагностики «кто-то командует мотором»,
 // и ошибка в нём означала бы пропущенную команду.
-static bool is_motor_command(uint32_t t) {
+bool fc_vesc_can_is_motor_packet(uint32_t t) {
     switch (t) {
     case 0:   // SET_DUTY
     case 1:   // SET_CURRENT
@@ -90,6 +102,42 @@ static bool is_motor_command(uint32_t t) {
     case 11:  // SET_CURRENT_BRAKE_REL
     case 12:  // SET_CURRENT_HANDBRAKE
     case 13:  // SET_CURRENT_HANDBRAKE_REL
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Всё, что меняет состояние ESC. Шире команд мотору: сюда попадает запись и
+// сохранение конфигурации, детекция FOC, выключение, смена скорости шины,
+// выходы IO-платы и балансировка BMS. Ни один из этих типов не должен быть
+// собираем в профиле ACTIVE_DIAG, и tests/can проверяет каждый поимённо.
+//
+// Отдельно про 5/6/7/8 (буферы): сами по себе они состояние не меняют, но
+// несут внутри COMM-пакет, который может менять что угодно. Они не в этом
+// списке намеренно — их безопасность решается на уровне COMM, см.
+// fc_vesc_comm_is_read_only().
+bool fc_vesc_can_is_state_changing(uint32_t t) {
+    if (fc_vesc_can_is_motor_packet(t)) {
+        return true;
+    }
+    switch (t) {
+    case 19:  // DETECT_APPLY_ALL_FOC — детекция и применение параметров
+    case 21:  // CONF_CURRENT_LIMITS
+    case 22:  // CONF_STORE_CURRENT_LIMITS — запись во flash
+    case 23:  // CONF_CURRENT_LIMITS_IN
+    case 24:  // CONF_STORE_CURRENT_LIMITS_IN
+    case 25:  // CONF_FOC_ERPMS
+    case 26:  // CONF_STORE_FOC_ERPMS
+    case 29:  // CONF_BATTERY_CUT
+    case 30:  // CONF_STORE_BATTERY_CUT
+    case 31:  // SHUTDOWN
+    case 36:  // IO_BOARD_SET_OUTPUT_DIGITAL
+    case 37:  // IO_BOARD_SET_OUTPUT_PWM
+    case 42:  // BMS_BAL
+    case 47:  // PSW_SWITCH
+    case 55:  // UPDATE_PID_POS_OFFSET
+    case 63:  // UPDATE_BAUD — смена скорости шины
         return true;
     default:
         return false;
@@ -108,6 +156,7 @@ FcVescCanId fc_vesc_can_decode(uint32_t id, bool extended) {
     r.known_type = false;
     r.is_status = false;
     r.is_motor_command = false;
+    r.is_state_changing = false;
     r.name = NULL;
 
     if (!extended) {
@@ -124,7 +173,83 @@ FcVescCanId fc_vesc_can_decode(uint32_t id, bool extended) {
     r.known_type = r.name != NULL;
     if (r.known_type) {
         r.is_status = is_status(r.packet_type);
-        r.is_motor_command = is_motor_command(r.packet_type);
+        r.is_motor_command = fc_vesc_can_is_motor_packet(r.packet_type);
+        r.is_state_changing = fc_vesc_can_is_state_changing(r.packet_type);
     }
     return r;
+}
+
+// --------------------------------------------------- уровень COMM (v0.7B)
+
+// Имена только тех номеров, которые нам действительно нужны: разрешённые
+// запросы и те опасные, против которых написаны тесты. Полная таблица COMM
+// здесь не нужна и вводила бы в заблуждение — «имя есть» легко прочитать как
+// «пакет поддержан».
+const char *fc_vesc_comm_name(uint8_t comm_id) {
+    switch (comm_id) {
+    case 0:  return "COMM_FW_VERSION";
+    case 1:  return "COMM_JUMP_TO_BOOTLOADER";
+    case 2:  return "COMM_ERASE_NEW_APP";
+    case 3:  return "COMM_WRITE_NEW_APP_DATA";
+    case 4:  return "COMM_GET_VALUES";
+    case 5:  return "COMM_SET_DUTY";
+    case 6:  return "COMM_SET_CURRENT";
+    case 7:  return "COMM_SET_CURRENT_BRAKE";
+    case 8:  return "COMM_SET_RPM";
+    case 9:  return "COMM_SET_POS";
+    case 10: return "COMM_SET_HANDBRAKE";
+    case 11: return "COMM_SET_DETECT";
+    case 12: return "COMM_SET_SERVO_POS";
+    case 13: return "COMM_SET_MCCONF";
+    case 14: return "COMM_GET_MCCONF";
+    case 15: return "COMM_GET_MCCONF_DEFAULT";
+    case 16: return "COMM_SET_APPCONF";
+    case 17: return "COMM_GET_APPCONF";
+    case 18: return "COMM_GET_APPCONF_DEFAULT";
+    case 20: return "COMM_TERMINAL_CMD";
+    case 24: return "COMM_DETECT_MOTOR_PARAM";
+    case 25: return "COMM_DETECT_MOTOR_R_L";
+    case 26: return "COMM_DETECT_MOTOR_FLUX_LINKAGE";
+    case 27: return "COMM_DETECT_ENCODER";
+    case 28: return "COMM_DETECT_HALL_FOC";
+    case 29: return "COMM_REBOOT";
+    case 30: return "COMM_ALIVE";
+    case 36: return "COMM_CUSTOM_APP_DATA";
+    case 47: return "COMM_GET_VALUES_SETUP";
+    case 48: return "COMM_SET_MCCONF_TEMP";
+    case 49: return "COMM_SET_MCCONF_TEMP_SETUP";
+    case 50: return "COMM_GET_VALUES_SELECTIVE";
+    default: return NULL;
+    }
+}
+
+// Белый список. Умолчание — «нельзя»: любой номер, которого здесь нет,
+// считается опасным, включая номера из будущих версий прошивки.
+//
+// Каждая ветка проверена по bldc release_6_06, comm/commands.c:
+//   COMM_FW_VERSION (0)          строки 231…  только чтение констант и UUID
+//   COMM_GET_VALUES (4)          строки 384…  упаковка телеметрии
+//   COMM_GET_MCCONF (14)         строки 591…  копия mc_interface_get_configuration()
+//   COMM_GET_MCCONF_DEFAULT (15) строки 591…  значения по умолчанию
+//   COMM_GET_APPCONF (17)        строки 654…  копия app_get_configuration()
+//   COMM_GET_APPCONF_DEFAULT (18) строки 654… значения по умолчанию
+//   COMM_GET_VALUES_SELECTIVE (50) строки 384… та же ветка, что GET_VALUES
+//
+// Проверялось именно отсутствие побочного эффекта, а не «название начинается
+// с GET»: timeout_reset() в commands.c встречается только в ветках
+// COMM_SET_DUTY, COMM_ALIVE, COMM_SET_ODOMETER и COMM_SET_CURRENT_REL, ни
+// одной из которых в списке нет.
+bool fc_vesc_comm_is_read_only(uint8_t comm_id) {
+    switch (comm_id) {
+    case 0:   // COMM_FW_VERSION
+    case 4:   // COMM_GET_VALUES
+    case 14:  // COMM_GET_MCCONF
+    case 15:  // COMM_GET_MCCONF_DEFAULT
+    case 17:  // COMM_GET_APPCONF
+    case 18:  // COMM_GET_APPCONF_DEFAULT
+    case 50:  // COMM_GET_VALUES_SELECTIVE
+        return true;
+    default:
+        return false;
+    }
 }

@@ -130,3 +130,211 @@ big-endian с размером несжатых данных, затем пот�
 Definition of Done на настоящем сокете: подключение, идентификация, телеметрия,
 загрузка QML, чтение схемы и конфигурации, запись параметра, переподключение,
 перезапуск процесса, входы RT App, блокировка команд мотору.
+
+---
+
+# 5. Обратная сторона: FloatCore как клиент CAN (v0.7B)
+
+Всё выше — про FloatCore в роли **устройства**, с которым говорит VESC Tool.
+Этот раздел про противоположную роль: FloatCore сам обращается к настоящему
+VESC по шине CAN. Роли не путать — наборы команд у них разные, и опасен здесь
+именно клиентский набор: он уходит в железо, способное крутить мотор.
+
+Источник — `vedderb/bldc`, ветка `release_6_06`: ровно та версия прошивки,
+которая стоит на стенде (`FW 6.6`, прочитано и по USB, и по CAN). Ничего не
+выведено из наблюдаемого трафика: номера и семантика взяты из `datatypes.h` и
+обработчиков `comm/comm_can.c` и `comm/commands.c`.
+
+Классификация продублирована в коде (`compat/can/fc_vesc_can.c`) и проверяется
+тестами поимённо, чтобы расхождение между документом и сборкой не могло
+остаться незамеченным.
+
+## 5.1. Как адресуются пакеты
+
+```
+передача:  eid = controller_id | ((uint32_t) packet_id << 8)
+приём:     uint8_t id = eid & 0xFF;  CAN_PACKET_ID cmd = eid >> 8;
+```
+
+Получатель обрабатывает пакет, если `id == 255 || id == id1 || id == id2`
+(`comm_can.c:1585`), где `id1` и `id2` — номера двух половин Dual FSESC. Из
+этого следует, что **широковещательный адрес 255 отвечает обеими половинами
+сразу**, и различить ответы нечем. FloatCore адрес 255 не собирает: попытка
+возвращает `FC_CAN_DIAG_BUILD_BROADCAST`.
+
+Собственный номер FloatCore на шине — **50**. Он не совпадает ни с 118, ни со
+100, и это закреплено `_Static_assert` в `fc_can_diag.h`.
+
+## 5.2. Полный перечень типов пакетов CAN
+
+Колонка «разрешено передавать» относится к профилю `ACTIVE_DIAG`. Пустая
+клетка означает, что собрать такой пакет в этом профиле нечем — не «запрещено
+правилом», а «нет кода».
+
+| № | Тип | Класс | Разрешено передавать |
+|---|---|---|---|
+| 0 | `CAN_PACKET_SET_DUTY` | **команда мотору** | — |
+| 1 | `CAN_PACKET_SET_CURRENT` | **команда мотору** | — |
+| 2 | `CAN_PACKET_SET_CURRENT_BRAKE` | **команда мотору** | — |
+| 3 | `CAN_PACKET_SET_RPM` | **команда мотору** | — |
+| 4 | `CAN_PACKET_SET_POS` | **команда мотору** | — |
+| 5 | `CAN_PACKET_FILL_RX_BUFFER` | буфер COMM | — |
+| 6 | `CAN_PACKET_FILL_RX_BUFFER_LONG` | буфер COMM | — |
+| 7 | `CAN_PACKET_PROCESS_RX_BUFFER` | буфер COMM | — |
+| 8 | `CAN_PACKET_PROCESS_SHORT_BUFFER` | буфер COMM | **да** |
+| 9 | `CAN_PACKET_STATUS` | статус (только приём) | — |
+| 10 | `CAN_PACKET_SET_CURRENT_REL` | **команда мотору** | — |
+| 11 | `CAN_PACKET_SET_CURRENT_BRAKE_REL` | **команда мотору** | — |
+| 12 | `CAN_PACKET_SET_CURRENT_HANDBRAKE` | **команда мотору** | — |
+| 13 | `CAN_PACKET_SET_CURRENT_HANDBRAKE_REL` | **команда мотору** | — |
+| 14 | `CAN_PACKET_STATUS_2` | статус (только приём) | — |
+| 15 | `CAN_PACKET_STATUS_3` | статус (только приём) | — |
+| 16 | `CAN_PACKET_STATUS_4` | статус (только приём) | — |
+| 17 | `CAN_PACKET_PING` | телеметрия, BMS, IO | **да** |
+| 18 | `CAN_PACKET_PONG` | ответ / опрос | — |
+| 19 | `CAN_PACKET_DETECT_APPLY_ALL_FOC` | меняет состояние | — |
+| 20 | `CAN_PACKET_DETECT_APPLY_ALL_FOC_RES` | ответ / опрос | — |
+| 21 | `CAN_PACKET_CONF_CURRENT_LIMITS` | меняет состояние | — |
+| 22 | `CAN_PACKET_CONF_STORE_CURRENT_LIMITS` | меняет состояние | — |
+| 23 | `CAN_PACKET_CONF_CURRENT_LIMITS_IN` | меняет состояние | — |
+| 24 | `CAN_PACKET_CONF_STORE_CURRENT_LIMITS_IN` | меняет состояние | — |
+| 25 | `CAN_PACKET_CONF_FOC_ERPMS` | меняет состояние | — |
+| 26 | `CAN_PACKET_CONF_STORE_FOC_ERPMS` | меняет состояние | — |
+| 27 | `CAN_PACKET_STATUS_5` | статус (только приём) | — |
+| 28 | `CAN_PACKET_POLL_TS5700N8501_STATUS` | ответ / опрос | — |
+| 29 | `CAN_PACKET_CONF_BATTERY_CUT` | меняет состояние | — |
+| 30 | `CAN_PACKET_CONF_STORE_BATTERY_CUT` | меняет состояние | — |
+| 31 | `CAN_PACKET_SHUTDOWN` | меняет состояние | — |
+| 32 | `CAN_PACKET_IO_BOARD_ADC_1_TO_4` | телеметрия, BMS, IO | — |
+| 33 | `CAN_PACKET_IO_BOARD_ADC_5_TO_8` | телеметрия, BMS, IO | — |
+| 34 | `CAN_PACKET_IO_BOARD_ADC_9_TO_12` | телеметрия, BMS, IO | — |
+| 35 | `CAN_PACKET_IO_BOARD_DIGITAL_IN` | телеметрия, BMS, IO | — |
+| 36 | `CAN_PACKET_IO_BOARD_SET_OUTPUT_DIGITAL` | меняет состояние | — |
+| 37 | `CAN_PACKET_IO_BOARD_SET_OUTPUT_PWM` | меняет состояние | — |
+| 38 | `CAN_PACKET_BMS_V_TOT` | телеметрия, BMS, IO | — |
+| 39 | `CAN_PACKET_BMS_I` | телеметрия, BMS, IO | — |
+| 40 | `CAN_PACKET_BMS_AH_WH` | телеметрия, BMS, IO | — |
+| 41 | `CAN_PACKET_BMS_V_CELL` | телеметрия, BMS, IO | — |
+| 42 | `CAN_PACKET_BMS_BAL` | меняет состояние | — |
+| 43 | `CAN_PACKET_BMS_TEMPS` | телеметрия, BMS, IO | — |
+| 44 | `CAN_PACKET_BMS_HUM` | телеметрия, BMS, IO | — |
+| 45 | `CAN_PACKET_BMS_SOC_SOH_TEMP_STAT` | телеметрия, BMS, IO | — |
+| 46 | `CAN_PACKET_PSW_STAT` | телеметрия, BMS, IO | — |
+| 47 | `CAN_PACKET_PSW_SWITCH` | меняет состояние | — |
+| 48 | `CAN_PACKET_BMS_HW_DATA_1` | телеметрия, BMS, IO | — |
+| 49 | `CAN_PACKET_BMS_HW_DATA_2` | телеметрия, BMS, IO | — |
+| 50 | `CAN_PACKET_BMS_HW_DATA_3` | телеметрия, BMS, IO | — |
+| 51 | `CAN_PACKET_BMS_HW_DATA_4` | телеметрия, BMS, IO | — |
+| 52 | `CAN_PACKET_BMS_HW_DATA_5` | телеметрия, BMS, IO | — |
+| 53 | `CAN_PACKET_BMS_AH_WH_CHG_TOTAL` | телеметрия, BMS, IO | — |
+| 54 | `CAN_PACKET_BMS_AH_WH_DIS_TOTAL` | телеметрия, BMS, IO | — |
+| 55 | `CAN_PACKET_UPDATE_PID_POS_OFFSET` | меняет состояние | — |
+| 56 | `CAN_PACKET_POLL_ROTOR_POS` | ответ / опрос | — |
+| 57 | `CAN_PACKET_NOTIFY_BOOT` | ответ / опрос | — |
+| 58 | `CAN_PACKET_STATUS_6` | статус (только приём) | — |
+| 59 | `CAN_PACKET_GNSS_TIME` | телеметрия, BMS, IO | — |
+| 60 | `CAN_PACKET_GNSS_LAT` | телеметрия, BMS, IO | — |
+| 61 | `CAN_PACKET_GNSS_LON` | телеметрия, BMS, IO | — |
+| 62 | `CAN_PACKET_GNSS_ALT_SPEED_HDOP` | телеметрия, BMS, IO | — |
+| 63 | `CAN_PACKET_UPDATE_BAUD` | меняет состояние | — |
+| 64 | `CAN_PACKET_BMS_STATUS_1` | телеметрия, BMS, IO | — |
+| 65 | `CAN_PACKET_BMS_STATUS_2` | телеметрия, BMS, IO | — |
+| 66 | `CAN_PACKET_BMS_STATUS_3` | телеметрия, BMS, IO | — |
+| 67 | `CAN_PACKET_BMS_STATUS_4` | телеметрия, BMS, IO | — |
+| 68 | `CAN_PACKET_BMS_STATUS_5` | телеметрия, BMS, IO | — |
+
+Разрешены ровно два номера из 69.
+
+## 5.3. Почему `PROCESS_SHORT_BUFFER` разрешён
+
+Сам по себе тип 8 состояние не меняет: он несёт внутри обычный пакет `COMM_*`
+и отдаёт его в `commands_process_packet()` (`comm_can.c:1749-1788`). То есть
+безопасность решается **не номером типа CAN, а номером COMM внутри него**:
+через тот же тип 8 одинаково проходит и запрос версии прошивки, и
+`COMM_SET_MCCONF`.
+
+Поэтому номер COMM в FloatCore задаётся таблицей внутри `fc_can_diag.c` и
+никогда не приходит от вызывающего кода. Вызывающий называет намерение
+(`FC_CAN_DIAG_FW_VERSION`), а не пакет.
+
+Формат запроса, `comm_can.c:1749-1777`:
+
+```
+data[0] = кому отвечать (наш номер, 50)
+data[1] = режим: 0 = обработать и ответить отправителю
+data[2] = номер COMM
+```
+
+Режим 0 выбран сознательно: 1 пересылает пакет дальше без обработки, 2
+обрабатывает молча без ответа, 3 отвечает без обёртки.
+
+## 5.4. Белый список COMM
+
+| № | Пакет | Почему безопасен |
+|---|---|---|
+| 0 | `COMM_FW_VERSION` | `commands.c:231` — читает константы сборки и UUID |
+| 4 | `COMM_GET_VALUES` | `commands.c:384` — упаковывает телеметрию |
+| 14 | `COMM_GET_MCCONF` | `commands.c:591` — копия `mc_interface_get_configuration()` |
+| 15 | `COMM_GET_MCCONF_DEFAULT` | там же, значения по умолчанию |
+| 17 | `COMM_GET_APPCONF` | `commands.c:654` — копия `app_get_configuration()` |
+| 18 | `COMM_GET_APPCONF_DEFAULT` | там же, значения по умолчанию |
+| 50 | `COMM_GET_VALUES_SELECTIVE` | та же ветка, что `GET_VALUES` |
+
+Проверялось **отсутствие побочного эффекта**, а не то, что название начинается
+с `GET`. Показательная проверка: `timeout_reset()` в `commands.c` встречается
+только в ветках `COMM_SET_DUTY` (488), `COMM_ALIVE` (700), `COMM_SET_ODOMETER`
+(893) и `COMM_SET_CURRENT_REL` (1185). Ни одной из них в списке нет.
+
+Умолчание — **«нельзя»**: `fc_vesc_comm_is_read_only()` возвращает `false` для
+любого номера вне списка, включая номера, которых в 6.6 ещё нет. Появление
+новой команды в будущей прошивке не откроет её автоматически.
+
+## 5.5. Явно запрещённое
+
+Ни один из этих пакетов не может быть собран в профиле `ACTIVE_DIAG`, и это
+проверяется негативным тестом компиляции, а не проверкой во время работы.
+
+**Команды мотору:** `SET_DUTY`, `SET_CURRENT`, `SET_CURRENT_BRAKE`, `SET_RPM`,
+`SET_POS`, `SET_CURRENT_REL`, `SET_CURRENT_BRAKE_REL`,
+`SET_CURRENT_HANDBRAKE`, `SET_CURRENT_HANDBRAKE_REL` — типы 0-4 и 10-13.
+
+**Через уровень COMM:** `COMM_SET_DUTY`, `COMM_SET_CURRENT`,
+`COMM_SET_CURRENT_BRAKE`, `COMM_SET_RPM`, `COMM_SET_POS`, `COMM_SET_HANDBRAKE`,
+`COMM_SET_SERVO_POS`, `COMM_SET_DETECT`.
+
+**Изменение конфигурации:** `COMM_SET_MCCONF`, `COMM_SET_APPCONF`,
+`COMM_SET_MCCONF_TEMP`, `COMM_SET_MCCONF_TEMP_SETUP`, а также
+`CAN_PACKET_CONF_*` (21-26, 29, 30) — включая варианты `CONF_STORE_*`, которые
+пишут во flash.
+
+**Детекция:** `CAN_PACKET_DETECT_APPLY_ALL_FOC` (19),
+`COMM_DETECT_MOTOR_PARAM`, `COMM_DETECT_MOTOR_R_L`,
+`COMM_DETECT_MOTOR_FLUX_LINKAGE`, `COMM_DETECT_ENCODER`, `COMM_DETECT_HALL_FOC`.
+
+**Прошивка и перезапуск:** `COMM_JUMP_TO_BOOTLOADER`, `COMM_ERASE_NEW_APP`,
+`COMM_WRITE_NEW_APP_DATA`, `COMM_ERASE_BOOTLOADER`, `COMM_REBOOT`,
+`CAN_PACKET_SHUTDOWN` (31).
+
+**Прочее, меняющее состояние:** `CAN_PACKET_UPDATE_BAUD` (63) — смена скорости
+шины, `IO_BOARD_SET_OUTPUT_DIGITAL` (36) и `_PWM` (37), `BMS_BAL` (42),
+`PSW_SWITCH` (47), `UPDATE_PID_POS_OFFSET` (55), `COMM_TERMINAL_CMD` (20),
+`COMM_ALIVE` (30) — продлевает моторный таймаут, `COMM_CUSTOM_APP_DATA` (36).
+
+## 5.6. Формат ответа
+
+Короткий ответ (полезная нагрузка ≤ 6 байт) приходит одним
+`PROCESS_SHORT_BUFFER`: `[кто ответил][режим][данные…]`.
+
+Длинный собирается из кусков (`comm_can.c:443-503`):
+
+```
+FILL_RX_BUFFER (5)        [смещение 1 байт][до 7 байт данных]
+FILL_RX_BUFFER_LONG (6)   [смещение 2 байта][до 6 байт данных]
+PROCESS_RX_BUFFER (7)     [кто][режим][len_hi][len_lo][crc_hi][crc_lo]
+```
+
+CRC — та же `crc16` CCITT (полином 0x1021, начальное 0), что в кадрах по USB.
+FloatCore пользуется общей реализацией `vesc_crc16()` из
+`compat/vesc_protocol/packet.c`, а не собственной копией: разойтись с VESC в
+контрольной сумме означало бы принимать мусор за ответ. Ответ без совпадения
+CRC отбрасывается и считается в `crc_errors`.

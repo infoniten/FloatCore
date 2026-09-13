@@ -27,8 +27,9 @@
 #include "../drivers/icm20948.h"
 #include "fc_imu_source.h"
 #include "fc_imu_cal_store.h"
-#include "fc_can_passive.h"
+#include "fc_can_bus.h"
 #include "../../../compat/can/fc_vesc_can.h"
+#include "../../../compat/vesc_protocol/packet.h"
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -90,7 +91,16 @@ static void cmd_supervisor(void) {
     printf("  footpad_engaged %d\n", st.inputs.footpad_engaged);
     printf("  calibration     %d (%s)\n", st.inputs.calibration_valid,
            fc_imu_cal_status_name((FcImuCalStatus) fc_imu_rt_cal_status()));
+#if FC_CAN_RX_AVAILABLE
+    // Модель здоровья узлов CAN существует с v0.7B, но эти входы Supervisor
+    // из неё НАМЕРЕННО не заполняются: подключение «оба VESC живы» к
+    // разрешающей логике создало бы второй путь к моторной команде помимо
+    // Motor Gate. Отсутствие VESC обязано только запрещать, и запрещает оно
+    // уже сейчас — тем, что backend-а вывода нет как кода.
+    printf("входы ESC (наблюдение CAN есть, к разрешению не подключено):\n");
+#else
     printf("входы под будущие этапы (CAN ещё нет):\n");
+#endif
     printf("  esc_a/esc_b     %d / %d\n", st.inputs.esc_a_alive, st.inputs.esc_b_alive);
     printf("  can_fresh       %d\n", st.inputs.can_fresh);
     printf("  battery/thermal %d / %d\n", st.inputs.battery_ok, st.inputs.thermal_ok);
@@ -305,14 +315,15 @@ static void cmd_imu_cal_show(void) {
 // тайминг вывода и ничего бы не дало. Здесь агрегаты, а последние кадры — в
 // отдельной команде can-frames.
 static void cmd_can(void) {
-    FcCanStats s = fc_can_passive_stats();
+    FcCanStats s = fc_can_bus_stats();
     uint64_t now = fc_uptime_us();
     double secs = s.started_us ? (double) (now - s.started_us) * 1e-6 : 0.0;
 
     printf("профиль CAN       %s\n", FC_CAN_PROFILE_NAME);
+    printf("режим TWAI        %s\n", fc_can_bus_mode_name());
     printf("транспорт мотору  %s\n", fc_can_backend_name());
     printf("контроллер        %s, приём %s\n", fc_can_bus_state_name(s.bus_state),
-           fc_can_passive_running() ? "запущен" : "не запущен");
+           fc_can_bus_running() ? "запущен" : "не запущен");
     printf("кадров            всего %llu за %.1f с (%.1f/с)\n",
            (unsigned long long) s.frames_total, secs,
            secs > 0 ? (double) s.frames_total / secs : 0.0);
@@ -325,6 +336,9 @@ static void cmd_can(void) {
            ", неудач передачи %" PRIu32 ", ошибок приёма %llu\n",
            s.bus_error_count, s.arb_lost_count, s.tx_failed_count,
            (unsigned long long) s.receive_errors);
+    printf("                  счётчик ошибок TX %" PRIu32 ", RX %" PRIu32 ", BUS_OFF %" PRIu32
+           ", восстановлений %" PRIu32 "\n",
+           s.tx_error_counter, s.rx_error_counter, s.bus_off_count, s.recoveries);
     if (s.last_frame_us) {
         printf("последний кадр    %.1f мс назад\n", (double) (now - s.last_frame_us) / 1000.0);
     } else {
@@ -364,9 +378,199 @@ static void cmd_can(void) {
     }
 }
 
+// Здоровье узлов. Наблюдение: ни одно значение отсюда никуда не подключено.
+static void cmd_can_health(void) {
+    FcCanHealth snap = fc_can_bus_health();
+    const FcCanHealth *h = &snap;
+    uint64_t now = fc_uptime_us();
+    printf("узлы CAN (порог молчания %.0f мс):\n", (double) h->stale_us / 1000.0);
+    for (uint32_t i = 0; i < h->count; ++i) {
+        const FcCanNode *n = &h->nodes[i];
+        printf("  id=%-3u %-10s %-9s статусов %-8" PRIu32 " ответов %-4" PRIu32
+               " таймаутов %-3" PRIu32 " падений %-3" PRIu32 " молчит ",
+               n->id, n->expected ? "ожидаемый" : "посторонний",
+               n->healthy ? "доступен" : "НЕДОСТУПЕН", n->statuses, n->diag_responses,
+               n->diag_timeouts, n->health_drops);
+        if (n->ever_seen) {
+            // Задача приёма обновляет отметку параллельно, поэтому она может
+            // оказаться свежее now: беззнаковая разность дала бы астрономическое
+            // число вместо нуля.
+            uint64_t age = now > n->last_seen_us ? now - n->last_seen_us : 0;
+            printf("%.0f мс\n", (double) age / 1000.0);
+        } else {
+            printf("никогда не отвечал\n");
+        }
+    }
+    printf("все ожидаемые доступны: %s\n",
+           fc_can_health_all_expected_healthy(h) ? "да" : "НЕТ");
+    printf("ВАЖНО: это наблюдение. Motor Gate этих значений не видит.\n");
+}
+
+#if FC_CAN_DIAG_TX_AVAILABLE
+static void print_diag_stats(void) {
+    FcCanDiagStats d = fc_can_bus_diag_stats();
+    printf("диагностика TX    запросов %llu, ответов %llu, таймаутов %llu\n",
+           (unsigned long long) d.requests, (unsigned long long) d.responses,
+           (unsigned long long) d.timeouts);
+    printf("                  отказов передачи %llu, ошибок CRC %llu, отклонено списком %llu,"
+           " придержано %llu\n",
+           (unsigned long long) d.tx_failures, (unsigned long long) d.crc_errors,
+           (unsigned long long) d.build_rejected, (unsigned long long) d.throttled);
+    printf("                  RTT последний %" PRIu32 " мкс, максимум %" PRIu32 " мкс\n",
+           d.last_rtt_us, d.max_rtt_us);
+}
+
+static void print_fw_payload(const uint8_t *p, uint16_t n) {
+    // Раскладка из bldc release_6_06, comm/commands.c:231-252.
+    if (n < 4) {
+        return;
+    }
+    printf("  версия прошивки  %u.%u\n", p[1], p[2]);
+    printf("  железо           %s\n", (const char *) (p + 3));
+    uint16_t i = (uint16_t) (3 + strlen((const char *) (p + 3)) + 1);
+    if (i + 12 <= n) {
+        printf("  UUID             ");
+        for (int b = 0; b < 12; ++b) {
+            printf("%02x", p[i + b]);
+        }
+        printf("\n");
+    }
+}
+
+static bool parse_diag_target(const char *arg, uint8_t *id_out) {
+    char *end = NULL;
+    long v = strtol(arg, &end, 10);
+    if (end == arg || v < 0 || v > 255) {
+        printf("нужен номер контроллера 0…254\n");
+        return false;
+    }
+    if (v == 255) {
+        printf("широковещательный адрес 255 запрещён: ответят обе половины сразу\n");
+        return false;
+    }
+    *id_out = (uint8_t) v;
+    return true;
+}
+
+// Один read-only запрос. SAFE_READONLY: белый список не даёт собрать ничего,
+// что меняло бы состояние ESC (см. compat/can/fc_can_diag.h).
+static void cmd_can_diag(const char *args, bool hex) {
+    FcCanDiagRequest req;
+    const char *rest;
+    if (!strncmp(args, "ping ", 5)) {
+        req = FC_CAN_DIAG_PING;
+        rest = args + 5;
+    } else if (!strncmp(args, "fw ", 3)) {
+        req = FC_CAN_DIAG_FW_VERSION;
+        rest = args + 3;
+    } else if (!strncmp(args, "values ", 7)) {
+        req = FC_CAN_DIAG_VALUES;
+        rest = args + 7;
+    } else if (!strncmp(args, "mcconf ", 7)) {
+        req = FC_CAN_DIAG_MCCONF;
+        rest = args + 7;
+    } else if (!strncmp(args, "appconf ", 8)) {
+        req = FC_CAN_DIAG_APPCONF;
+        rest = args + 8;
+    } else {
+        printf("can-diag <ping|fw|values|mcconf|appconf> <id>\n");
+        return;
+    }
+
+    uint8_t target;
+    if (!parse_diag_target(rest, &target)) {
+        return;
+    }
+
+    static uint8_t buf[FC_CAN_DIAG_RX_MAX];
+    uint16_t n = 0;
+    uint8_t comm = fc_can_diag_request_comm_id(req);
+    printf("запрос %s -> контроллер %u (тип пакета %" PRIu32 ", ", fc_can_diag_request_name(req),
+           target, fc_can_diag_request_packet_type(req));
+    if (comm == 0xFFu) {
+        printf("COMM-уровень не используется)\n");
+    } else {
+        printf("COMM %u = %s)\n", comm, fc_vesc_comm_name(comm));
+    }
+
+    if (!fc_can_bus_diag_request(req, target, 500, buf, sizeof(buf), &n)) {
+        printf("ОТВЕТА НЕТ\n");
+        print_diag_stats();
+        return;
+    }
+
+    FcCanDiagStats d = fc_can_bus_diag_stats();
+    printf("ответ %u байт за %" PRIu32 " мкс, CRC16 %04x\n", n, d.last_rtt_us,
+           vesc_crc16(buf, n));
+
+    if (req == FC_CAN_DIAG_PING) {
+        printf("  ответил id=%u, тип железа %u\n", buf[0], n > 1 ? buf[1] : 0);
+    } else if (req == FC_CAN_DIAG_FW_VERSION) {
+        print_fw_payload(buf, n);
+    }
+
+    if (hex) {
+        for (uint16_t i = 0; i < n; ++i) {
+            if (i % 32 == 0) {
+                printf("\n  %03u  ", i);
+            }
+            printf("%02x", buf[i]);
+        }
+        printf("\n");
+    }
+}
+#endif  // FC_CAN_DIAG_TX_AVAILABLE
+
+// Низкотемповая диагностическая сессия (ТЗ v0.7B §10, §20 шаг 10).
+//
+// Ни одного печатного символа внутри сессии: измерять тайминг и одновременно
+// печатать в UART бессмысленно — известно, что печать сама даёт опоздание.
+// Сводка выводится один раз в конце.
+//
+// Темп задан жёстко и не настраивается: один запрос в секунду. Периодический
+// STATUS остаётся основным источником телеметрии, диагностика — редкое
+// событие.
+#if FC_CAN_DIAG_TX_AVAILABLE
+static void cmd_can_diag_poll(const char *arg) {
+    char *end = NULL;
+    long secs = strtol(arg, &end, 10);
+    if (end == arg || secs < 1 || secs > 600) {
+        printf("can-diag-poll <секунды 1…600>\n");
+        return;
+    }
+
+    static const struct {
+        FcCanDiagRequest req;
+        uint8_t target;
+    } ROTATION[] = {
+        {FC_CAN_DIAG_PING, 118},
+        {FC_CAN_DIAG_PING, 100},
+        {FC_CAN_DIAG_FW_VERSION, 118},
+        {FC_CAN_DIAG_FW_VERSION, 100},
+    };
+    const int n_rot = (int) (sizeof(ROTATION) / sizeof(ROTATION[0]));
+
+    printf("сессия %ld с, 1 запрос/с, вывод только в конце\n", secs);
+
+    uint32_t ok = 0, fail = 0;
+    for (long i = 0; i < secs; ++i) {
+        int k = (int) (i % n_rot);
+        if (fc_can_bus_diag_request(ROTATION[k].req, ROTATION[k].target, 500, NULL, 0, NULL)) {
+            ++ok;
+        } else {
+            ++fail;
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    printf("сессия завершена: успешно %" PRIu32 ", без ответа %" PRIu32 "\n", ok, fail);
+    print_diag_stats();
+}
+#endif
+
 static void cmd_can_frames(void) {
     static FcCanFrame f[FC_CAN_RING];
-    uint32_t n = fc_can_passive_ring(f, FC_CAN_RING);
+    uint32_t n = fc_can_bus_ring(f, FC_CAN_RING);
     printf("последние %" PRIu32 " кадров (новейший внизу):\n", n);
     for (uint32_t i = 0; i < n; ++i) {
         printf("  %10llu us  0x%08" PRIx32 " %s%s dlc=%u ", (unsigned long long) f[i].t_us,
@@ -679,20 +883,20 @@ static void cmd_footpad_sim(bool on) {
 // Нужна для того, чтобы приписать изменение тайминга именно приёму CAN, а не
 // предполагать это: один и тот же двоичный файл измеряется с приёмом и без.
 static void cmd_can_stop(void) {
-    if (!fc_can_passive_running()) {
+    if (!fc_can_bus_running()) {
         printf("can-stop: приём и так не запущен\n");
         return;
     }
-    fc_can_passive_stop();
+    fc_can_bus_stop();
     printf("can-stop: приём остановлен, драйвер TWAI выгружен\n");
 }
 
 static void cmd_can_start(void) {
-    if (fc_can_passive_running()) {
+    if (fc_can_bus_running()) {
         printf("can-start: приём уже идёт\n");
         return;
     }
-    printf("can-start: %s\n", fc_can_passive_start() ? "приём запущен" : "TWAI не поднялся");
+    printf("can-start: %s\n", fc_can_bus_start() ? "приём запущен" : "TWAI не поднялся");
 }
 #endif
 
@@ -779,7 +983,12 @@ static void cmd_help(void) {
     printf("диагностика (read-only): status | supervisor | imu | i2cscan | timing | timing-hist |\n");
     printf("                         tasks | heap | config | safety | imu-cal-show | help\n");
 #if FC_CAN_RX_AVAILABLE
-    printf("шина CAN (только приём): can | can-frames | can-reset\n");
+    printf("шина CAN:                can | can-frames | can-reset | can-health\n");
+#if FC_CAN_DIAG_TX_AVAILABLE
+    printf("диагностика CAN (r/o):   can-diag <ping|fw|values|mcconf|appconf> <id>\n");
+    printf("                         can-diag-hex <...> <id> | can-diag-poll <сек>\n");
+    printf("                         can-diag-stats | can-diag-reset\n");
+#endif
 #endif
 #if FC_LAB_DIAGNOSTICS
     printf("меняют состояние:        ready | disarm | fault-clear | persist | timing-reset |\n");
@@ -814,8 +1023,23 @@ static void dispatch(const char *line) {
     } else if (!strcmp(line, "can-frames")) {
         cmd_can_frames();
     } else if (!strcmp(line, "can-reset")) {
-        fc_can_passive_reset_stats();
+        fc_can_bus_reset_stats();
         printf("can: статистика обнулена\n");
+    } else if (!strcmp(line, "can-health")) {
+        cmd_can_health();
+#if FC_CAN_DIAG_TX_AVAILABLE
+    } else if (!strncmp(line, "can-diag-hex ", 13)) {
+        cmd_can_diag(line + 13, true);
+    } else if (!strncmp(line, "can-diag ", 9)) {
+        cmd_can_diag(line + 9, false);
+    } else if (!strncmp(line, "can-diag-poll ", 14)) {
+        cmd_can_diag_poll(line + 14);
+    } else if (!strcmp(line, "can-diag-stats")) {
+        print_diag_stats();
+    } else if (!strcmp(line, "can-diag-reset")) {
+        fc_can_bus_diag_reset_stats();
+        printf("диагностика CAN: статистика обнулена\n");
+#endif
 #endif
     } else if (!strcmp(line, "i2cscan")) {
         cmd_i2cscan();

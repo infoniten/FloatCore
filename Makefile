@@ -57,13 +57,15 @@ REFLOAT_INC := -I$(ROOT)/compat/vesc_api -I$(ROOT)/tests/host/mock -I$(ROOT)/com
 
 ESP32_TESTS_BIN := $(BIN)/esp32_platform_tests
 SAFETY_TESTS_BIN := $(BIN)/safety_tests
+DIAG_TESTS_BIN := $(BIN)/can_diag_tests
 HOST_TESTS_BIN := $(BIN)/refloat_host_tests
 PROTO_TESTS_BIN := $(BIN)/protocol_tests
 HOST_BIN := $(BIN)/floatcore_host
 
 .PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32 safety-tests can-negative-test
 
-all: $(HOST_TESTS_BIN) $(PROTO_TESTS_BIN) $(HOST_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN)
+all: $(HOST_TESTS_BIN) $(PROTO_TESTS_BIN) $(HOST_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN) \
+     $(DIAG_TESTS_BIN)
 
 # ----------------------------------------------------------------- генерация
 
@@ -178,7 +180,7 @@ $(HOST_BIN): $(FH_OBJ)
 
 # --------------------------------------------------------------------- запуск
 
-test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN)
+test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN) $(DIAG_TESTS_BIN)
 	@echo ""
 	$(PROTO_TESTS_BIN)
 	@echo ""
@@ -187,6 +189,8 @@ test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN
 	$(ESP32_TESTS_BIN)
 	@echo ""
 	$(SAFETY_TESTS_BIN)
+	@echo ""
+	$(DIAG_TESTS_BIN)
 
 # Интеграционный прогон поднимает FloatCore Host и говорит с ним по настоящему
 # протоколу VESC — то же, что делает VESC Tool, только без GUI.
@@ -203,7 +207,7 @@ host: $(HOST_BIN)
 # host в том же профиле LAB_SAFE, что и прошивка.
 
 SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(wildcard $(ROOT)/compat/imu/*.c) \
-              $(wildcard $(ROOT)/compat/can/*.c) \
+              $(wildcard $(ROOT)/compat/can/*.c) $(ROOT)/compat/vesc_protocol/packet.c \
               $(ROOT)/tests/safety/test_safety.c $(wildcard $(ROOT)/tests/imu/*.c) \
               $(ROOT)/tests/can/test_can.c
 SAFETY_OBJ := $(patsubst %,$(OBJ)/saf_%.o,$(notdir $(basename $(SAFETY_SRC))))
@@ -229,6 +233,10 @@ $(OBJ)/saf_%.o: $(ROOT)/compat/can/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 
+$(OBJ)/saf_%.o: $(ROOT)/compat/vesc_protocol/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
 $(OBJ)/saf_%.o: $(ROOT)/tests/can/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
@@ -239,20 +247,71 @@ $(SAFETY_TESTS_BIN): $(SAFETY_OBJ)
 
 safety-tests: $(SAFETY_TESTS_BIN)
 
+# ------------------------- тесты диагностического CAN (host, ACTIVE_DIAG)
+#
+# Отдельный двоичный файл с другим профилем. Проверять белый список передачи
+# в той же сборке, где включён пассивный профиль, было бы самообманом: слой
+# там просто отсутствует. Заодно это доказывает, что оба профиля собираются.
+
+DIAG_SRC := $(ROOT)/compat/can/fc_can_diag.c $(ROOT)/compat/can/fc_can_health.c \
+            $(ROOT)/compat/can/fc_vesc_can.c $(ROOT)/compat/vesc_protocol/packet.c \
+            $(ROOT)/tests/can/test_can_diag.c
+DIAG_OBJ := $(patsubst %,$(OBJ)/diag_%.o,$(notdir $(basename $(DIAG_SRC))))
+DIAG_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_ACTIVE_DIAG=1
+
+$(OBJ)/diag_%.o: $(ROOT)/compat/can/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(DIAG_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/diag_%.o: $(ROOT)/compat/vesc_protocol/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(DIAG_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/diag_%.o: $(ROOT)/tests/can/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(DIAG_CFLAGS) -MMD -MP -c $< -o $@
+
+$(DIAG_TESTS_BIN): $(DIAG_OBJ)
+	@mkdir -p $(BIN)
+	$(CC) $^ -lm -o $@
+
+diag-tests: $(DIAG_TESTS_BIN)
+
 # ---------------------------------- негативный тест компиляции CAN TX (v0.7A)
 #
 # Успех цели — это ПРОВАЛ компиляции. Формулировка неочевидная, поэтому цель
 # вынесена отдельно и печатает, что именно проверяется: в пассивном профиле
 # обращение к функции передачи обязано не собираться.
 can-negative-test:
-	@echo "негативный тест: вызов CAN TX в пассивном профиле НЕ должен компилироваться"
-	@if $(CC) $(CSTD) -DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_PASSIVE=1 \
-	        -c $(ROOT)/tests/can/negative_tx.c -o /dev/null 2>$(BIN)/can_negative.log; then \
-	    echo "      \033[31mFAIL\033[0m файл собрался — путь передачи в CAN существует"; \
+	@echo "негативные тесты компиляции: пути передачи не должны существовать"
+	@mkdir -p $(BIN)
+	@$(MAKE) --no-print-directory neg-one \
+	    NEG_FILE=$(ROOT)/tests/can/negative_tx.c \
+	    NEG_DEFS="-DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_PASSIVE=1" \
+	    NEG_WHAT="обобщённая передача в пассивном профиле"
+	@$(MAKE) --no-print-directory neg-one \
+	    NEG_FILE=$(ROOT)/tests/can/negative_tx.c \
+	    NEG_DEFS="-DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_ACTIVE_DIAG=1" \
+	    NEG_WHAT="обобщённая передача в диагностическом профиле"
+	@$(MAKE) --no-print-directory neg-one \
+	    NEG_FILE=$(ROOT)/tests/can/negative_motor_tx.c \
+	    NEG_DEFS="-DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_ACTIVE_DIAG=1" \
+	    NEG_WHAT="моторная команда в диагностическом профиле"
+	@$(MAKE) --no-print-directory neg-one \
+	    NEG_FILE=$(ROOT)/tests/can/negative_diag_in_passive.c \
+	    NEG_DEFS="-DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_PASSIVE=1" \
+	    NEG_WHAT="диагностическая передача в пассивном профиле"
+
+# Успех цели — это ПРОВАЛ компиляции. Формулировка неочевидная, поэтому цель
+# вынесена отдельно и печатает, что именно проверялось.
+neg-one:
+	@if $(CC) $(CSTD) $(NEG_DEFS) -c $(NEG_FILE) -o /dev/null 2>$(BIN)/can_negative.log; then \
+	    echo "      \033[31mFAIL\033[0m $(NEG_WHAT): файл собрался — путь существует"; \
 	    exit 1; \
 	else \
-	    echo "      \033[32mPASS\033[0m компиляция отклонена:"; \
-	    grep -m2 -iE "poison|implicit|undeclared" $(BIN)/can_negative.log | sed 's/^/            /'; \
+	    echo "      \033[32mPASS\033[0m $(NEG_WHAT): компиляция отклонена"; \
+	    grep -m1 -iE "poison|implicit|undeclared|unknown type" $(BIN)/can_negative.log \
+	        | sed 's/^/            /'; \
 	fi
 
 # ------------------------------------------------- тесты платформы ESP32 (host)

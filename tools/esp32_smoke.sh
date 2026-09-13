@@ -99,7 +99,50 @@ if [ -n "$NM" ] && [ -f "$ELF" ]; then
     # они не могут по трём независимым причинам — очередь передачи имеет
     # нулевую длину, поставить в неё кадр нечем, а контроллер поднят в
     # listen-only, где передатчик отключён аппаратно.
-    check_absent 'twai_transmit'           "CAN TX API драйвера"
+    # Профиль CAN определяется по самой прошивке, а не по предположению: имя
+    # профиля попадает в двоичный файл строкой FC_CAN_PROFILE_NAME.
+    if strings "$ELF" | grep -q "ACTIVE_DIAG"; then
+        CANPROF="active_diag"
+    elif strings "$ELF" | grep -q "PASSIVE (listen-only)"; then
+        CANPROF="passive"
+    else
+        CANPROF="absent"
+    fi
+    info "профиль CAN в образе: $CANPROF"
+
+    if [ "$CANPROF" = "passive" ]; then
+        # twai_transmit выбрасывает сборщик мусора компоновщика: в пассивном
+        # профиле функции передачи не объявлены и вызвать их неоткуда.
+        # Символы twai_hal_*tx* остаются — их тянет обработчик прерывания,
+        # общий для приёма и передачи. Выполниться они не могут: очередь
+        # передачи нулевой длины, поставить в неё кадр нечем, а контроллер
+        # поднят в listen-only, где передатчик отключён аппаратно.
+        check_absent 'twai_transmit'   "CAN TX API драйвера"
+        check_absent 'fc_can_diag'     "диагностическая передача"
+    else
+        # В диагностическом профиле twai_transmit присутствует намеренно —
+        # это и есть разрешённая передача. Проверяется не её отсутствие, а
+        # то, что вход в неё ровно один и он не обобщённый:
+        #
+        #   transmit_whitelisted  обязан быть 't' — статический, вызвать его
+        #                         из другого модуля нельзя даже по ошибке;
+        #   fc_can_bus_diag_request  единственный внешний вход, принимает
+        #                         намерение, а не кадр.
+        if echo "$SYMS" | grep -qE ' t transmit_whitelisted$'; then
+            pass "точка передачи статическая (локальный символ)"
+        else
+            fail "transmit_whitelisted не локальный символ — передача доступна извне"
+            echo "$SYMS" | grep -i transmit_whitelisted | sed 's/^/            /'
+        fi
+        if echo "$SYMS" | grep -qE ' [tT] fc_can_bus_diag_request$'; then
+            pass "единственный внешний вход в передачу: fc_can_bus_diag_request"
+        else
+            fail "fc_can_bus_diag_request отсутствует — собран не тот код"
+        fi
+        # Прочих обёрток передачи быть не должно ни под каким именем.
+        check_absent 'fc_can_send'     "обобщённая отправка кадра"
+        check_absent 'comm_can_set_'   "моторные обёртки CAN из bldc"
+    fi
     check_absent 'fc_can_transmit'         "CAN TX API FloatCore"
     check_absent 'fc_motor_gate_set_backend' "регистрация backend-а мотора"
     check_absent 'manual_set_current'      "ручная подача тока"

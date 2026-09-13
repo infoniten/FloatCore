@@ -59,10 +59,19 @@ static void test_unknown(void) {
     check(!r.known_type && r.name == NULL, "тип не выдуман");
     check(!r.is_status && !r.is_motor_command, "неизвестный тип не классифицируется");
 
-    // Дыра в перечислении: 59 в bldc идёт после STATUS_6 = 58 и в таблице
-    // отсутствует. Проверяем, что это не считается известным.
+    // На v0.7A таблица заканчивалась на STATUS_6 = 58, и 59 был примером
+    // неизвестного номера. На v0.7B таблица дополнена до 68 по datatypes.h
+    // прошивки 6.6, которая реально стоит на стенде, поэтому 59 стал
+    // известным типом. Проверяем оба факта: и что таблица дополнена, и что
+    // за её пределами номера по-прежнему не выдумываются.
     r = fc_vesc_can_decode((59u << 8) | 1u, true);
+    check(r.known_type && strcmp(r.name, "GNSS_TIME") == 0, "таблица дополнена до прошивки 6.6");
+    r = fc_vesc_can_decode((68u << 8) | 1u, true);
+    check(r.known_type && strcmp(r.name, "BMS_STATUS_5") == 0, "последний известный номер 68");
+    r = fc_vesc_can_decode((69u << 8) | 1u, true);
     check(!r.known_type, "номер за пределами таблицы не считается известным");
+    r = fc_vesc_can_decode((200u << 8) | 1u, true);
+    check(!r.known_type && r.name == NULL, "далёкий номер тоже не выдумывается");
 }
 
 static void test_motor_commands(void) {
@@ -110,7 +119,19 @@ static void test_profile(void) {
     // can-negative-test: там успех — это отказ компилятора.
 }
 
+static void test_passive_has_no_diag(void) {
+    printf("\n\033[1mПассивный профиль: диагностической передачи нет\033[0m\n");
+    check(FC_CAN_DIAG_TX_AVAILABLE == 0, "FC_CAN_DIAG_TX_AVAILABLE = 0");
+    check(FC_CAN_TX_AVAILABLE == 0, "транспорт команд мотору отсутствует");
+    check(FC_CAN_RX_AVAILABLE == 1, "приём при этом доступен");
+    // Сам факт, что этот файл собрался, уже доказывает: заголовок
+    // fc_can_diag.h в пассивном профиле не объявляет ничего. Обратное
+    // проверяется негативным тестом tests/can/negative_diag_in_passive.c.
+    note("профиль CAN: %s", FC_CAN_PROFILE_NAME);
+}
+
 void test_can_all(void) {
+    test_passive_has_no_diag();
     printf("\n\033[1mТесты CAN: разбор идентификаторов VESC и гарантии профиля\033[0m\n");
     test_id_format();
     test_standard_frames();

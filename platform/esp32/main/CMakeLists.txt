@@ -15,7 +15,7 @@ idf_component_register(
         "fc_timing.c"
         "fc_console.c"
         "fc_can_absent.c"
-        "fc_can_passive.c"
+        "fc_can_bus.c"
         "fc_supervisor_task.c"
         "fc_safety_report.c"
         "../drivers/icm20948.c"
@@ -27,6 +27,9 @@ idf_component_register(
         "../../../compat/imu/fc_imu_calibration.c"
         "../../../compat/imu/fc_imu_detect.c"
         "../../../compat/can/fc_vesc_can.c"
+        "../../../compat/can/fc_can_diag.c"
+        "../../../compat/can/fc_can_health.c"
+        "../../../compat/vesc_protocol/packet.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS
         "${CMAKE_CURRENT_LIST_DIR}/../../../compat/vesc_api"
@@ -39,7 +42,25 @@ idf_component_register(
 # На этапах v0.5–v0.6x собирается только лабораторный профиль.
 target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_LAB_SAFE=1)
 
-# Профиль шины CAN. PASSIVE означает listen-only и полное отсутствие функций
-# передачи в сборке (ТЗ v0.7A §6). Активный профиль появится отдельным этапом
-# и с LAB_SAFE несовместим по построению — см. fc_build_profile.h.
-target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_CAN_PASSIVE=1)
+# Профиль шины CAN — тоже свойство двоичного файла.
+#
+#   passive      TWAI в listen-only, ни одной функции передачи в сборке нет.
+#   active_diag  TWAI в normal mode, разрешены только read-only запросы из
+#                белого списка compat/can/fc_can_diag.h (ТЗ v0.7B).
+#
+# Значение задаётся при сборке: `idf.py -DFLOATCORE_CAN_PROFILE=passive build`.
+# Умолчание — active_diag, текущий этап. Ни один из них не совместим с
+# транспортом команд мотору: это проверяет fc_build_profile.h.
+if(NOT DEFINED FLOATCORE_CAN_PROFILE)
+    set(FLOATCORE_CAN_PROFILE "active_diag")
+endif()
+
+if(FLOATCORE_CAN_PROFILE STREQUAL "passive")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_CAN_PASSIVE=1)
+elseif(FLOATCORE_CAN_PROFILE STREQUAL "active_diag")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_CAN_ACTIVE_DIAG=1)
+else()
+    message(FATAL_ERROR "FLOATCORE_CAN_PROFILE: ожидается passive или active_diag, получено "
+                        "'${FLOATCORE_CAN_PROFILE}'")
+endif()
+message(STATUS "FloatCore: профиль CAN = ${FLOATCORE_CAN_PROFILE}")

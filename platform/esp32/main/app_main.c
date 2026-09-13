@@ -13,7 +13,7 @@
 
 #include "fc_platform.h"
 #include "fc_imu_source.h"
-#include "fc_can_passive.h"
+#include "fc_can_bus.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
 #include "../../../compat/safety/fc_build_profile.h"
 #include "../../../compat/safety/fc_imu_health.h"
@@ -150,6 +150,27 @@ static void print_banner(uint32_t boot_count) {
            fc_motor_gate_backend_name());
     printf("can:         %s\n", fc_can_backend_name());
     printf("can profile: %s\n", FC_CAN_PROFILE_NAME);
+#if FC_CAN_DIAG_TX_AVAILABLE
+    // Обязательная преамбула перед первой передачей в шину (ТЗ v0.7B §5).
+    // Печатается один раз при загрузке, до того как передача вообще может
+    // быть вызвана: разрешение передавать должно быть видно в логе, а не
+    // подразумеваться.
+    printf("------------------------------------------------\n");
+    printf("ACTIVE_DIAG_CAN: передача read-only запросов РАЗРЕШЕНА\n");
+    printf("  motor physically disconnected  (условие этапа v0.7B)\n");
+    printf("  Motor Gate backend             %s\n", fc_motor_gate_backend_name());
+    printf("  MOTOR_CAPABLE                  absent\n");
+    printf("  наш номер на шине              %u\n", FC_CAN_SELF_ID);
+    printf("  TX whitelist                   ");
+    for (int i = 0; i < FC_CAN_DIAG_REQUEST_COUNT; ++i) {
+        printf("%s%s", i ? ", " : "", fc_can_diag_request_name((FcCanDiagRequest) i));
+    }
+    printf("\n");
+    printf("  темп не чаще                   %.1f запросов/с\n",
+           1e6 / (double) FC_CAN_DIAG_MIN_INTERVAL_US);
+    printf("  всё остальное                  недоступно на этапе компиляции\n");
+    printf("------------------------------------------------\n");
+#endif
     // Источник контура. Печатается до его запуска, поэтому берётся константа
     // сборки, а не текущее состояние: иначе баннер сообщал бы «mock» просто
     // потому, что реальный датчик ещё не поднимали.
@@ -280,9 +301,9 @@ void app_main(void) {
 
     // 4. Пассивный приём CAN. Только слушает: функций передачи в этой сборке
     //    не существует, а контроллер поднят в listen-only, где передатчик
-    //    отключён аппаратно (обоснование — fc_can_passive.h).
+    //    отключён аппаратно (обоснование — fc_can_bus.h).
 #if FC_CAN_RX_AVAILABLE
-    bool can_rx = fc_can_passive_start();
+    bool can_rx = fc_can_bus_start();
     printf("[floatcore] CAN: %s\n",
            can_rx ? "TWAI listen-only поднят, приём идёт"
                   : "TWAI НЕ поднялся — приём отсутствует");
