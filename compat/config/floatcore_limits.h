@@ -83,6 +83,10 @@ float fc_effective_temp_motor_end(void);
 
 float fc_effective_max_duty(void);
 
+// Реальная батарея аппарата: 10S Li-ion. Подтверждено владельцем и
+// согласуется с отсечками ESC (docs/battery_safety_model.md).
+#define FC_BATTERY_CELLS_DEFAULT 10
+
 uint8_t fc_battery_cell_count(void);
 float fc_battery_v_min(void);
 float fc_battery_v_max(void);

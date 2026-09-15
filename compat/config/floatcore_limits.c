@@ -24,8 +24,17 @@ void floatcore_limits_init(void) {
         .max_duty = 0.95f,
     };
 
+    // Число ячеек реальной батареи аппарата: 10S Li-ion. Подтверждено
+    // владельцем и согласуется с каждой отсечкой в конфигурации ESC —
+    // 34.0/31.0 В это 3.40/3.10 В на ячейку, а regen-отсечка 42.0 В это
+    // ровно 4.20 В на ячейку (docs/battery_safety_model.md).
+    //
+    // Значение НЕ информационное. Refloat умножает на него пороги отката по
+    // напряжению, если они заданы на ячейку (refloat-upstream/src/
+    // motor_data.c:79-88), поэтому ошибка здесь сдвигает предупреждение
+    // водителю в разы.
     L.battery = (FcBatteryConfig){
-        .cell_count = 20,
+        .cell_count = FC_BATTERY_CELLS_DEFAULT,
         .cell_v_min = 3.0f,
         .cell_v_max = 4.2f,
     };
@@ -123,7 +132,12 @@ float fc_effective_max_duty(void) {
 }
 
 uint8_t fc_battery_cell_count(void) {
-    return L.battery.cell_count;
+    // Ноль здесь недопустим. Refloat умножает пороги отката на число ячеек
+    // только если оно больше нуля (motor_data.c:80), иначе он трактует
+    // «3.0 В» как абсолютный порог для всей батареи — то есть откат по
+    // низкому напряжению не сработает никогда. Забыть вызвать init нельзя,
+    // но если это случится, отказ обязан быть громким, а не тихим.
+    return L.battery.cell_count ? L.battery.cell_count : FC_BATTERY_CELLS_DEFAULT;
 }
 
 float fc_battery_v_min(void) {

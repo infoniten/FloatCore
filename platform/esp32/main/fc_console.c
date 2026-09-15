@@ -29,6 +29,7 @@
 #include "fc_imu_cal_store.h"
 #include "fc_can_bus.h"
 #include "fc_log_port.h"
+#include "fc_sched.h"
 #include "../../../compat/can/fc_vesc_can.h"
 #include "../../../compat/vesc_protocol/packet.h"
 
@@ -605,6 +606,36 @@ static void cmd_can_frames(void) {
 }
 #endif
 
+// Качество пробуждения потоков Refloat (ТЗ v0.7D §11).
+static void cmd_sched(void) {
+    printf("точность пробуждения потоков Refloat:\n");
+    for (size_t i = 0; i < fc_thread_count() && i < FC_SCHED_MAX_THREADS; ++i) {
+        FcSchedStats s = fc_sched_stats(i);
+        if (!s.iterations) {
+            continue;
+        }
+        printf("  %-14s n=%-8llu просил %6.1f мкс, спал %6.1f мкс, задержка mean %5.1f "
+               "min %" PRIu32 " max %" PRIu32 "\n",
+               fc_thread_name(i), (unsigned long long) s.iterations,
+               (double) s.requested_sum_us / (double) s.iterations,
+               (double) s.actual_sum_us / (double) s.iterations,
+               (double) s.latency_sum_us / (double) s.iterations, s.latency_min_us,
+               s.latency_max_us);
+        printf("  %-14s гистограмма задержки, мкс:", "");
+        for (int b = 0; b < 10; ++b) {
+            if (s.latency_hist[b]) {
+                if (b == 9) {
+                    printf("  900+:%" PRIu32, s.latency_hist[b]);
+                } else {
+                    printf("  %d-%d:%" PRIu32, b * 100, b * 100 + 99, s.latency_hist[b]);
+                }
+            }
+        }
+        printf("\n");
+    }
+    printf("задержка пробуждения — это НЕ время исполнения: поток в этот момент спит\n");
+}
+
 static void cmd_tasks(void) {
     printf("задачи FloatCore:\n");
     printf("  %-14s свободно минимум %u B из 5120 (единая цепочка: датчик -> Refloat)\n",
@@ -1030,6 +1061,7 @@ static void cmd_help(void) {
     printf("                         tasks | heap | config | safety | imu-cal-show | help\n");
 #if FC_CAN_RX_AVAILABLE
     printf("журнал:                  log\n");
+    printf("планировщик:             sched | sched-reset\n");
     printf("шина CAN:                can | can-frames | can-reset | can-health\n");
 #if FC_CAN_DIAG_TX_AVAILABLE
     printf("диагностика CAN (r/o):   can-diag <ping|fw|values|mcconf|appconf> <id>\n");
@@ -1064,6 +1096,11 @@ static void dispatch(const char *line) {
         cmd_imu();
     } else if (!strcmp(line, "tasks")) {
         cmd_tasks();
+    } else if (!strcmp(line, "sched")) {
+        cmd_sched();
+    } else if (!strcmp(line, "sched-reset")) {
+        fc_sched_reset();
+        printf("sched: статистика обнулена\n");
 #if FC_CAN_RX_AVAILABLE
     } else if (!strcmp(line, "can")) {
         cmd_can();

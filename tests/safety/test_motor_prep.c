@@ -250,6 +250,53 @@ static void test_motor_model(void) {
     }
     check(detected > 0 && detected == must_refresh,
           "все измеряемые детекцией параметры помечены к обновлению после неё");
+
+    // У каждого параметра должен быть записан критерий подтверждения
+    // (ТЗ v0.7D §15). «Когда-нибудь проверим» — не критерий.
+    int with_criterion = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (all[i].verify_criterion && all[i].verify_criterion[0]) {
+            ++with_criterion;
+        }
+    }
+    check(with_criterion == (int) n, "у каждого параметра записан критерий подтверждения");
+    note("критерий для полюсов: %s", poles->verify_criterion);
+}
+
+// ---------------------------------------- пороги отката против отсечек ESC
+
+static void test_tiltback_vs_derating(void) {
+    printf("\n\033[1mПороги отката против ограничений ESC (10S)\033[0m\n");
+    const char *why = NULL;
+
+    // Низкое напряжение. Предупреждение обязано прийти РАНЬШЕ, чем ESC
+    // начнёт срезать ток, иначе водитель узнает о разряде по пропавшей тяге.
+    FcBatteryModel m = stand_model(10);
+    m.refloat_tiltback_lv = 3.5f;  // 35 В против отсечки 34 В
+    m.refloat_tiltback_hv = 4.1f;  // 41 В против regen-отсечки 41.5 В
+    check(fc_battery_model_valid(&m, &why), "предлагаемая политика 3.5/4.1 В/яч сходится");
+    note("LV %.1f В > отсечка %.1f В: запас %.1f В на просадку под нагрузкой",
+         (double) fc_battery_refloat_lv_volts(&m), (double) m.cut_start,
+         (double) (fc_battery_refloat_lv_volts(&m) - m.cut_start));
+
+    // Высокое напряжение — зеркальная задача. Значение Refloat по умолчанию
+    // 4.3 В/яч даёт 43 В, а это ВЫШЕ полностью заряженной 10S (42.0 В):
+    // порог недостижим, и предупреждение не придёт никогда, хотя regen ESC
+    // начинает срезаться уже на 41.5 В.
+    FcBatteryModel hv_default = stand_model(10);
+    hv_default.refloat_tiltback_hv = 4.3f;
+    check(fc_battery_refloat_hv_volts(&hv_default) > hv_default.regen_cut_start,
+          "порог 4.3 В/яч выше начала regen-отсечки — предупреждение опаздывает");
+    check(fc_battery_refloat_hv_volts(&hv_default) > hv_default.regen_cut_end,
+          "порог 4.3 В/яч вообще недостижим для 10S");
+    note("HV по умолчанию %.1f В при максимуме батареи %.1f В — никогда не сработает",
+         (double) fc_battery_refloat_hv_volts(&hv_default), (double) hv_default.regen_cut_end);
+
+    check(fc_battery_refloat_hv_volts(&m) < m.regen_cut_start,
+          "предлагаемые 4.1 В/яч срабатывают раньше начала regen-отсечки");
+    note("HV %.1f В < начало regen-отсечки %.1f В: запас %.1f В",
+         (double) fc_battery_refloat_hv_volts(&m), (double) m.regen_cut_start,
+         (double) (m.regen_cut_start - fc_battery_refloat_hv_volts(&m)));
 }
 
 // -------------------------------------------------- контракт разрешения
@@ -273,6 +320,22 @@ static void test_motor_permit(void) {
     fc_motor_permit_condition_names(&n_names);
     check(r.reason_count == n_names, "перечислены ВСЕ невыполненные условия, а не первое");
     note("условий в контракте: %u", n_names);
+    check(n_names >= 20, "контракт расширен проверками качества платформы (ТЗ v0.7D §19)");
+
+    // Новые входы обязаны запрещать так же, как и старые.
+    const char *added[] = {"realtime-квалификация не пройдена", "модель батареи не проверена",
+                           "политика сторожевого таймера не проверена",
+                           "параметры мотора не подтверждены на моторе"};
+    const char *const *names = fc_motor_permit_condition_names(NULL);
+    for (size_t a = 0; a < sizeof(added) / sizeof(added[0]); ++a) {
+        bool found = false;
+        for (uint32_t i = 0; i < n_names; ++i) {
+            if (strcmp(names[i], added[a]) == 0) {
+                found = true;
+            }
+        }
+        check(found, added[a]);
+    }
 
     in = all_true();
     fc_motor_permit_evaluate(&in, &r);
@@ -369,6 +432,7 @@ void test_motor_prep_all(void) {
     test_command_stream();
     test_battery_model();
     test_motor_model();
+    test_tiltback_vs_derating();
     test_motor_permit();
     test_logger();
 }

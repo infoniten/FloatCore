@@ -51,6 +51,9 @@ typedef struct {
     bool safe_before_detection;      // можно ли опираться до детекции
     bool must_refresh_after_detection;
     const char *note;
+    // Что именно переводит параметр в FC_PARAM_VERIFIED (ТЗ v0.7D §15).
+    // Формулируется как ПРОВЕРЯЕМОЕ действие, а не как «убедиться».
+    const char *verify_criterion;
 } FcMotorParam;
 
 /** Таблица параметров. Возвращает количество через n. */

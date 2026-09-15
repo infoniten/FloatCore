@@ -14,6 +14,7 @@
 #include "fc_platform.h"
 #include "fc_imu_source.h"
 #include "fc_can_bus.h"
+#include "../../../compat/config/floatcore_limits.h"
 #include "fc_log_port.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
 #include "../../../compat/safety/fc_build_profile.h"
@@ -261,6 +262,11 @@ void app_main(void) {
     //    fc_log_port_emit печатает напрямую: контура ещё нет, и потерять
     //    сообщение об отказе инициализации хуже, чем задержаться.
     fc_log_port_init();
+
+    //    Пределы и модель батареи — до fc_vesc_if_init(): именно оттуда
+    //    Refloat получит число ячеек, а от него зависят пороги отката по
+    //    напряжению.
+    floatcore_limits_init();
 
     // 1. Хранилище — до всего остального: Refloat читает конфигурацию в init().
     bool storage_ok = fc_storage_init();

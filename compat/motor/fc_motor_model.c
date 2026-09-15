@@ -21,6 +21,7 @@ static const FcMotorParam PARAMS[] = {
         .must_refresh_after_detection = true,
         .note = "половины различаются — признак того, что детекция когда-то "
                 "делалась раздельно и на реальном железе",
+        .verify_criterion = "новая детекция FOC на физически подключённом ИМЕННО ЭТОМ моторе",
     },
     {
         .name = "foc_motor_l",
@@ -33,6 +34,7 @@ static const FcMotorParam PARAMS[] = {
         .safe_before_detection = false,
         .must_refresh_after_detection = true,
         .note = "разброс между половинами 19 % — много для одинаковых моторов",
+        .verify_criterion = "новая детекция FOC на физически подключённом ИМЕННО ЭТОМ моторе",
     },
     {
         .name = "foc_motor_flux_linkage",
@@ -46,6 +48,7 @@ static const FcMotorParam PARAMS[] = {
         .must_refresh_after_detection = true,
         .note = "ровно 0.1 на обеих половинах при разных R и L — round number, "
                 "какие детекция не выдаёт; похоже на ручной ввод",
+        .verify_criterion = "новая детекция FOC на физически подключённом ИМЕННО ЭТОМ моторе",
     },
     {
         .name = "si_motor_poles",
@@ -59,6 +62,7 @@ static const FcMotorParam PARAMS[] = {
         .must_refresh_after_detection = false,
         .note = "детекция FOC число полюсов НЕ определяет; проверяется только "
                 "вращением с известной механической скоростью",
+        .verify_criterion = "вращение вывешенного колеса на известной механической скорости и сравнение с ERPM: полюса = 2 x ERPM / об-мин",
     },
     {
         .name = "l_current_max",
@@ -71,6 +75,7 @@ static const FcMotorParam PARAMS[] = {
         .safe_before_detection = true,
         .must_refresh_after_detection = false,
         .note = "предел, а не свойство мотора: детекция его менять не должна",
+        .verify_criterion = "предел выбирается человеком, детекцией не подтверждается; считается подтверждённым после проверки на вывешенном колесе",
     },
     {
         .name = "l_current_min",
@@ -84,6 +89,7 @@ static const FcMotorParam PARAMS[] = {
         .must_refresh_after_detection = false,
         .note = "асимметрия 25/-5 означает слабое торможение: для баланса это "
                 "решение, которое надо принять осознанно",
+        .verify_criterion = "то же, плюс проверка, что торможение не даёт недопустимого regen",
     },
     {
         .name = "l_in_current_max",
@@ -96,6 +102,7 @@ static const FcMotorParam PARAMS[] = {
         .safe_before_detection = true,
         .must_refresh_after_detection = false,
         .note = "входной ток батареи, действует поверх моторного",
+        .verify_criterion = "то же, плюс измерение тока батареи под нагрузкой",
     },
     {
         .name = "si_battery_cells",
@@ -109,6 +116,7 @@ static const FcMotorParam PARAMS[] = {
         .must_refresh_after_detection = false,
         .note = "ПРОТИВОРЕЧИТ отсечкам: 34.0/31.0 В и 41.5/42.0 В описывают 10S, "
                 "а не 3S. Refloat умножает пороги HV/LV на это число",
+        .verify_criterion = "измерение напряжения батареи мультиметром и сверка с числом ячеек",
     },
     {
         .name = "si_wheel_diameter",
@@ -122,6 +130,7 @@ static const FcMotorParam PARAMS[] = {
         .must_refresh_after_detection = false,
         .note = "83 мм для моноколеса неправдоподобно — вместе с gear_ratio 3.0 "
                 "похоже на остатки конфигурации другого аппарата",
+        .verify_criterion = "физическое измерение диаметра колеса",
     },
     {
         .name = "si_gear_ratio",
@@ -134,6 +143,7 @@ static const FcMotorParam PARAMS[] = {
         .safe_before_detection = false,
         .must_refresh_after_detection = false,
         .note = "у мотор-колеса прямой привод, то есть 1.0",
+        .verify_criterion = "подтверждение прямого привода мотор-колеса, то есть 1.0",
     },
 };
 
