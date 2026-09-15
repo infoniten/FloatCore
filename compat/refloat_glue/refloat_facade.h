@@ -59,5 +59,15 @@ const char *refloat_facade_footpad_name(int fs);
 //
 // Платформа обязана предоставить floatcore_config_apply(): вызов сохранённого
 // указателя set_cfg.
+/**
+ * Пороги отката по напряжению, В на ячейку (ТЗ v0.7D.1).
+ *
+ * Отвергает значения вне окна 2…5 В на ячейку и случай hv <= lv: опечатка в
+ * пороге предупреждения водителю — тот случай, когда отказать лучше, чем
+ * записать.
+ */
+bool refloat_facade_set_voltage_tiltback(float lv_per_cell, float hv_per_cell);
+void refloat_facade_get_voltage_tiltback(float *lv_per_cell, float *hv_per_cell);
+
 bool refloat_facade_config_save_test(float value);
 float refloat_facade_config_test_value(void);

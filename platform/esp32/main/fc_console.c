@@ -28,6 +28,7 @@
 #include "fc_imu_source.h"
 #include "fc_imu_cal_store.h"
 #include "fc_can_bus.h"
+#include "../../../compat/config/floatcore_limits.h"
 #include "fc_log_port.h"
 #include "fc_sched.h"
 #include "../../../compat/can/fc_vesc_can.h"
@@ -809,6 +810,46 @@ static void cmd_fault_clear(void) {
            fc_supervisor_fault_name(fc_supervisor_status().faults));
 }
 
+// Пороги отката по напряжению. SAFE: меняет конфигурацию Refloat, не ESC.
+// Запись проходит ту же политику супервизора, что и любая другая.
+static void cmd_tiltback(const char *args) {
+    float lv = 0.0f, hv = 0.0f;
+    refloat_facade_get_voltage_tiltback(&lv, &hv);
+    uint8_t cells = fc_battery_cell_count();
+
+    if (!args || !*args) {
+        printf("пороги отката по напряжению (конфигурация Refloat):\n");
+        printf("  tiltback_lv  %.2f В/ячейку -> %.1f В при %u ячейках\n", (double) lv,
+               (double) (lv < 10.0f ? lv * cells : lv), cells);
+        printf("  tiltback_hv  %.2f В/ячейку -> %.1f В при %u ячейках\n", (double) hv,
+               (double) (hv < 10.0f ? hv * cells : hv), cells);
+        printf("изменить: tiltback <lv> <hv>   (В на ячейку)\n");
+        return;
+    }
+
+    char *end = NULL;
+    float new_lv = strtof(args, &end);
+    if (end == args) {
+        printf("tiltback <lv> <hv>\n");
+        return;
+    }
+    char *end2 = NULL;
+    float new_hv = strtof(end, &end2);
+    if (end2 == end) {
+        printf("tiltback <lv> <hv>\n");
+        return;
+    }
+
+    printf("tiltback: %.2f -> %.2f В/яч (низкое), %.2f -> %.2f В/яч (высокое)\n", (double) lv,
+           (double) new_lv, (double) hv, (double) new_hv);
+    bool ok = refloat_facade_set_voltage_tiltback(new_lv, new_hv);
+    printf("tiltback: запись %s\n", ok ? "принята" : "ОТКЛОНЕНА");
+    refloat_facade_get_voltage_tiltback(&lv, &hv);
+    printf("tiltback: сейчас %.2f / %.2f В/яч = %.1f / %.1f В при %u ячейках\n", (double) lv,
+           (double) hv, (double) (lv * cells), (double) (hv * cells), cells);
+    printf("tiltback: коммит в NVS выполняет задача хранилища, не контур\n");
+}
+
 static void cmd_persist(void) {
     float before = refloat_facade_config_test_value();
     float next = (before >= 0.9f) ? 0.25f : before + 0.1f;
@@ -1060,6 +1101,7 @@ static void cmd_help(void) {
     printf("диагностика (read-only): status | supervisor | imu | i2cscan | timing | timing-hist |\n");
     printf("                         tasks | heap | config | safety | imu-cal-show | help\n");
 #if FC_CAN_RX_AVAILABLE
+    printf("пороги напряжения:       tiltback | tiltback <lv> <hv>\n");
     printf("журнал:                  log\n");
     printf("планировщик:             sched | sched-reset\n");
     printf("шина CAN:                can | can-frames | can-reset | can-health\n");
@@ -1148,6 +1190,8 @@ static void dispatch(const char *line) {
         cmd_disarm();
     } else if (!strcmp(line, "fault-clear")) {
         cmd_fault_clear();
+    } else if (!strncmp(line, "tiltback", 8)) {
+        cmd_tiltback(line[8] == ' ' ? line + 9 : "");
     } else if (!strcmp(line, "persist")) {
         cmd_persist();
     } else if (!strcmp(line, "timing-reset")) {
