@@ -37,6 +37,16 @@ typedef struct {
 
 static FcChannel g_ch[FC_TIMING_COUNT];
 
+// Снимок фазы загрузки (ТЗ v0.7C §7).
+//
+// Загрузка печатает в UART десятки строк, и контур в это время неизбежно
+// опаздывает. Смешивать это с установившимся режимом нельзя: единичный
+// пропуск на старте иначе навсегда останется в цифрах и будет маскировать
+// настоящие пропуски, которые появятся потом. Поэтому статистика делится на
+// две фазы явным событием, а не отбрасывается.
+static FcTimingStats g_boot[FC_TIMING_COUNT];
+static bool g_steady;
+
 static const char *const kNames[FC_TIMING_COUNT] = {
     [FC_TIMING_CONTROL] = "control (imu_ref_callback)",
     [FC_TIMING_MAIN] = "refloat_thd",
@@ -70,6 +80,30 @@ void fc_timing_reset(void) {
     for (int i = 0; i < FC_TIMING_COUNT; ++i) {
         channel_reset(&g_ch[i], (FcTimingChannel) i, now);
     }
+}
+
+void fc_timing_mark_steady(void) {
+    if (g_steady) {
+        return;
+    }
+    uint64_t now = fc_uptime_us();
+    for (int i = 0; i < FC_TIMING_COUNT; ++i) {
+        g_boot[i] = fc_timing_get((FcTimingChannel) i);
+        channel_reset(&g_ch[i], (FcTimingChannel) i, now);
+    }
+    g_steady = true;
+}
+
+bool fc_timing_is_steady(void) {
+    return g_steady;
+}
+
+FcTimingStats fc_timing_get_boot(FcTimingChannel ch) {
+    if ((unsigned) ch >= FC_TIMING_COUNT) {
+        FcTimingStats empty = {0};
+        return empty;
+    }
+    return g_boot[ch];
 }
 
 void fc_timing_set_nominal(FcTimingChannel ch, uint32_t period_us) {

@@ -208,7 +208,8 @@ host: $(HOST_BIN)
 
 SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(wildcard $(ROOT)/compat/imu/*.c) \
               $(wildcard $(ROOT)/compat/can/*.c) $(ROOT)/compat/vesc_protocol/packet.c \
-              $(ROOT)/tests/safety/test_safety.c $(wildcard $(ROOT)/tests/imu/*.c) \
+              $(wildcard $(ROOT)/compat/motor/*.c) $(wildcard $(ROOT)/compat/log/*.c) \
+              $(wildcard $(ROOT)/tests/safety/*.c) $(wildcard $(ROOT)/tests/imu/*.c) \
               $(ROOT)/tests/can/test_can.c
 SAFETY_OBJ := $(patsubst %,$(OBJ)/saf_%.o,$(notdir $(basename $(SAFETY_SRC))))
 SAFETY_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_PASSIVE=1
@@ -234,6 +235,14 @@ $(OBJ)/saf_%.o: $(ROOT)/compat/can/%.c
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJ)/saf_%.o: $(ROOT)/compat/vesc_protocol/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/saf_%.o: $(ROOT)/compat/motor/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/saf_%.o: $(ROOT)/compat/log/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 

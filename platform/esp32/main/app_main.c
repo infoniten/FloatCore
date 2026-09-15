@@ -14,6 +14,7 @@
 #include "fc_platform.h"
 #include "fc_imu_source.h"
 #include "fc_can_bus.h"
+#include "fc_log_port.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
 #include "../../../compat/safety/fc_build_profile.h"
 #include "../../../compat/safety/fc_imu_health.h"
@@ -254,6 +255,13 @@ void app_main(void) {
     fc_supervisor_init(t);
     fc_motor_gate_init();
 
+    // 0. Журнал — раньше всего остального. С этого момента realtime-пути
+    //    (контур IMU, refloat_thd, драйвер датчика, VESC_IF->printf) кладут
+    //    записи в кольцо вместо синхронной печати в UART. До поднятия кольца
+    //    fc_log_port_emit печатает напрямую: контура ещё нет, и потерять
+    //    сообщение об отказе инициализации хуже, чем задержаться.
+    fc_log_port_init();
+
     // 1. Хранилище — до всего остального: Refloat читает конфигурацию в init().
     bool storage_ok = fc_storage_init();
 
@@ -358,5 +366,29 @@ void app_main(void) {
     xTaskCreatePinnedToCore(report_task, "fc_report", 4096, NULL, 3, NULL, FC_CORE_HOUSEKEEPING);
     fc_console_start();
     printf("\nfloatcore> ");
+
+    // 9. Закрытие фазы загрузки (ТЗ v0.7C §7).
+    //
+    //    Пока печатался баннер и шла инициализация, контур неизбежно
+    //    опаздывал: несколько килобайт в UART на 115200 бод — это сотни
+    //    миллисекунд. Держать это в одной статистике с установившимся
+    //    режимом значило бы навсегда спрятать в ней пропуск дедлайна и
+    //    потерять способность заметить настоящий.
+    //
+    //    Поэтому фаза закрывается явным событием: ждём, пока кольцо журнала
+    //    опустеет и UART допечатает, и только потом переключаем счётчики.
+    //    Цифры фазы загрузки не выбрасываются — они уходят в снимок и
+    //    доступны командой `timing`.
+    //
+    //    Будущий профиль MOTOR_CAPABLE обязан запрещать выход на мотор, пока
+    //    fc_boot_phase_done() не вернёт true.
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    for (int i = 0; i < 100 && fc_log_port_stats().pending; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    fflush(stdout);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    fc_boot_phase_complete(fc_uptime_us());
+    fc_timing_mark_steady();
     fflush(stdout);
 }

@@ -23,6 +23,7 @@
 // компенсации монтажного наклона. Оси датчика уходят в Refloat как есть —
 // обоснование тождественности преобразования в docs/imu_orientation_mapping.md.
 
+#include "fc_log_port.h"
 #include "fc_platform.h"
 
 #include "../../../compat/imu/fc_imu_pipeline.h"
@@ -224,8 +225,11 @@ static void imu_rt_task(void *arg) {
                 // Реинициализация не «кормит» супервизора выдуманными
                 // отметками: пока датчик не отдаст валидный семпл, отказ
                 // остаётся, и снять его может только оператор.
-                ESP_LOGW(TAG, "серия отказов чтения — переинициализация датчика (#%llu)",
-                         (unsigned long long) R.reinits);
+                // Печать отсюда — из контура 500 Гц. Синхронный вывод в UART
+                // стоил бы миллисекунд и съел бы несколько дедлайнов подряд
+                // ровно в тот момент, когда шина уже сбоит. Кладём в кольцо.
+                FC_LOGW(TAG, "серия отказов чтения — переинициализация датчика (#%llu)",
+                        (unsigned long long) R.reinits);
                 icm20948_config_t cfg = R.cfg;
                 icm20948_init(&cfg);
                 esp_task_wdt_reset();
@@ -255,11 +259,16 @@ static void imu_rt_task(void *arg) {
             fc_imu_pipeline_residual_ready()) {
             R.startup_done = true;
             FcImuPipelineStats ps = fc_imu_pipeline_stats();
-            ESP_LOGI(TAG,
-                     "IMU стабилен, остаток смещения %s: %+.2f %+.2f %+.2f °/с, контур запущен",
-                     fc_imu_residual_state_name(ps.residual_state),
-                     (double) ps.residual_bias_dps[0], (double) ps.residual_bias_dps[1],
-                     (double) ps.residual_bias_dps[2]);
+            // Целые милли-градусы, а не %f: преобразование float в строку в
+            // newlib на ESP32 программное и стоит сотни микросекунд. Здесь
+            // это путь контура, и такой ценой информация не стоит — тем
+            // более что в milli°/с она не теряется.
+            FC_LOGI(TAG,
+                    "IMU стабилен, остаток смещения %s: %+ld %+ld %+ld m°/с, контур запущен",
+                    fc_imu_residual_state_name(ps.residual_state),
+                    (long) (ps.residual_bias_dps[0] * 1000.0f),
+                    (long) (ps.residual_bias_dps[1] * 1000.0f),
+                    (long) (ps.residual_bias_dps[2] * 1000.0f));
         }
 
         void (*cb)(float *, float *, float *, float) = R.callback;

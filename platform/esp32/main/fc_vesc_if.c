@@ -9,6 +9,7 @@
 // time_t). Включается только SDK-заголовок VESC через общий shim
 // compat/vesc_api/vesc_c_if.h.
 
+#include "fc_log_port.h"
 #include "fc_platform.h"
 
 #include "../../../compat/safety/fc_motor_gate.h"
@@ -285,7 +286,11 @@ static int if_printf(const char *fmt, ...) {
     int n = vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     ++S.log_lines;
-    ESP_LOGI("refloat", "%s", buf);
+    // Это VESC_IF->printf: его зовёт сам Refloat, из refloat_thd, то есть из
+    // realtime-пути. Код upstream мы не правим, поэтому единственное место,
+    // где можно убрать блокировку, — здесь. Синхронный ESP_LOGI отсюда
+    // блокировал бы контур на миллисекунды.
+    FC_LOGI("refloat", "%s", buf);
     return n;
 }
 

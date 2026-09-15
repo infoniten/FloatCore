@@ -28,6 +28,7 @@
 #include "fc_imu_source.h"
 #include "fc_imu_cal_store.h"
 #include "fc_can_bus.h"
+#include "fc_log_port.h"
 #include "../../../compat/can/fc_vesc_can.h"
 #include "../../../compat/vesc_protocol/packet.h"
 
@@ -379,6 +380,27 @@ static void cmd_can(void) {
 }
 
 // Здоровье узлов. Наблюдение: ни одно значение отсюда никуда не подключено.
+// Состояние отложенного журнала (ТЗ v0.7C §6).
+static void cmd_log(void) {
+    FcLogPortStats s = fc_log_port_stats();
+    printf("журнал            фаза загрузки %s",
+           fc_boot_phase_done() ? "закрыта" : "ИДЁТ");
+    if (fc_boot_phase_done()) {
+        printf(" на %.2f с", (double) fc_boot_phase_end_us() / 1e6);
+    }
+    printf("\n");
+    printf("записей           принято %" PRIu32 ", напечатано %" PRIu32 ", в очереди %" PRIu32
+           "\n", s.emitted, s.printed, s.pending);
+    printf("потери            отброшено %" PRIu32 ", обрезано %" PRIu32 "\n", s.dropped,
+           s.truncated);
+    printf("кольцо            пик заполнения %" PRIu32 " из %d\n", s.high_water, FC_LOG_SLOTS);
+    printf("стоимость вызова  худшая %" PRIu32 " мкс, тег %s (UART той же строкой — тысячи)\n",
+           s.max_format_us, s.max_format_tag[0] ? s.max_format_tag : "-");
+    if (s.dropped) {
+        printf("ВНИМАНИЕ: записи терялись — кольцо мало или сливальщик не успевает\n");
+    }
+}
+
 static void cmd_can_health(void) {
     FcCanHealth snap = fc_can_bus_health();
     const FcCanHealth *h = &snap;
@@ -625,12 +647,36 @@ static void print_timing(FcTimingChannel ch) {
     }
 }
 
-static void cmd_timing(void) {
+static void print_timing_table(void) {
     printf("периодичность (esp_timer, отметка в момент пробуждения задачи):\n");
     for (int i = 0; i < FC_TIMING_COUNT; ++i) {
         print_timing((FcTimingChannel) i);
     }
 }
+
+static void cmd_timing(void) {
+    // Две фазы печатаются раздельно (ТЗ v0.7C §7). Загрузка печатает в UART
+    // килобайты, и опоздания контура в этот момент неизбежны и ожидаемы.
+    // Смешивать их с установившимся режимом нельзя: один пропуск со старта
+    // иначе навсегда осел бы в цифрах и маскировал бы настоящие.
+    if (fc_timing_is_steady()) {
+        printf("\nфаза загрузки (счётчики закрыты на %.2f с, печать баннера внутри окна):\n",
+               (double) fc_boot_phase_end_us() / 1e6);
+        for (int i = 0; i < FC_TIMING_COUNT; ++i) {
+            FcTimingStats t = fc_timing_get_boot((FcTimingChannel) i);
+            if (!t.iterations) {
+                continue;
+            }
+            printf("  %-26s n=%-7llu late %" PRIu32 " missed %" PRIu32 " max %" PRIu32 "\n",
+                   t.name, (unsigned long long) t.iterations, t.late, t.missed, t.max_period_us);
+        }
+        printf("\nустановившийся режим:\n");
+    } else {
+        printf("\nфаза загрузки ЕЩЁ ИДЁТ — цифры ниже включают печать баннера:\n");
+    }
+    print_timing_table();
+}
+
 
 static void cmd_timing_hist(void) {
     static uint32_t bins[FC_TIMING_BINS + 1];
@@ -983,6 +1029,7 @@ static void cmd_help(void) {
     printf("диагностика (read-only): status | supervisor | imu | i2cscan | timing | timing-hist |\n");
     printf("                         tasks | heap | config | safety | imu-cal-show | help\n");
 #if FC_CAN_RX_AVAILABLE
+    printf("журнал:                  log\n");
     printf("шина CAN:                can | can-frames | can-reset | can-health\n");
 #if FC_CAN_DIAG_TX_AVAILABLE
     printf("диагностика CAN (r/o):   can-diag <ping|fw|values|mcconf|appconf> <id>\n");
@@ -1025,6 +1072,8 @@ static void dispatch(const char *line) {
     } else if (!strcmp(line, "can-reset")) {
         fc_can_bus_reset_stats();
         printf("can: статистика обнулена\n");
+    } else if (!strcmp(line, "log")) {
+        cmd_log();
     } else if (!strcmp(line, "can-health")) {
         cmd_can_health();
 #if FC_CAN_DIAG_TX_AVAILABLE

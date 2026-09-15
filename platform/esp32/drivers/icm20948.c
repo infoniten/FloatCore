@@ -8,6 +8,13 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+// Журнал через кольцо, а не напрямую в UART: icm20948_init() вызывается в
+// том числе ИЗ КОНТУРА — задача fc_imu_rt переинициализирует датчик после
+// серии отказов чтения. В этом сценарии драйвер печатает до полутора десятков
+// строк, и синхронный вывод остановил бы контур на сотню миллисекунд ровно
+// тогда, когда шина уже нестабильна.
+#include "../main/fc_log_port.h"
+
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_timer.h"
@@ -361,7 +368,7 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
         }
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
     // Дальше работаем с разрешённым адресом. icm20948_bus_init уже записал его
@@ -375,7 +382,7 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     g_stage = "аппаратный сброс (PWR_MGMT_1.DEVICE_RESET)";
     err = reg_write(REG_PWR_MGMT_1, PWR_MGMT_1_DEVICE_RESET);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
     // Datasheet §10 «Power-on reset time» даёт около 100 мс, и раньше этого
@@ -410,11 +417,11 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     }
     D.reset_wait_us = (uint32_t) (esp_timer_get_time() - wait_t0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s), ждали %" PRIu32 " мс", g_stage,
+        FC_LOGE(TAG, "отказ на шаге: %s (%s), ждали %" PRIu32 " мс", g_stage,
                  esp_err_to_name(err), D.reset_wait_us / 1000);
         return err;
     }
-    ESP_LOGI(TAG, "датчик ответил через %" PRIu32 " мс после DEVICE_RESET (пауза datasheet 100 мс)",
+    FC_LOGI(TAG, "датчик ответил через %" PRIu32 " мс после DEVICE_RESET (пауза datasheet 100 мс)",
              100 + D.reset_wait_us / 1000);
 
     // 2. Снять сон и выбрать источник тактирования. CLKSEL = 1 — «auto select
@@ -424,7 +431,7 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     g_stage = "пробуждение (PWR_MGMT_1.CLKSEL)";
     err = reg_write_retry(REG_PWR_MGMT_1, PWR_MGMT_1_CLKSEL_AUTO);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
     // §10 «Gyroscope start-up time»: 35 мс до выхода на режим.
@@ -434,7 +441,7 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     g_stage = "включение всех осей (PWR_MGMT_2)";
     err = reg_write_retry(REG_PWR_MGMT_2, 0x00);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
@@ -442,7 +449,7 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     g_stage = "выбор банка 2";
     err = select_bank_retry(2);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
@@ -452,7 +459,7 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     g_stage = "ODR_ALIGN_EN";
     err = reg_write_retry(REG_ODR_ALIGN_EN, 0x01);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
@@ -464,13 +471,13 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     g_stage = "GYRO_CONFIG_1";
     err = reg_write_retry(REG_GYRO_CONFIG_1, gyro_cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
     g_stage = "GYRO_SMPLRT_DIV";
     err = reg_write_retry(REG_GYRO_SMPLRT_DIV, D.cfg.smplrt_div);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
@@ -480,27 +487,27 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     g_stage = "ACCEL_CONFIG";
     err = reg_write_retry(REG_ACCEL_CONFIG, accel_cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
     // Делитель акселерометра 12-битный и разложен на два регистра.
     g_stage = "ACCEL_SMPLRT_DIV_1";
     err = reg_write_retry(REG_ACCEL_SMPLRT_DIV_1, 0x00);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
     g_stage = "ACCEL_SMPLRT_DIV_2";
     err = reg_write_retry(REG_ACCEL_SMPLRT_DIV_2, D.cfg.smplrt_div);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
     g_stage = "возврат в банк 0";
     err = select_bank_retry(0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 
@@ -510,7 +517,7 @@ esp_err_t icm20948_init(const icm20948_config_t *cfg) {
     g_stage = "USER_CTRL (I2C-мастер датчика выключен)";
     err = reg_write_retry(REG_USER_CTRL, 0x00);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
+        FC_LOGE(TAG, "отказ на шаге: %s (%s)", g_stage, esp_err_to_name(err));
         return err;
     }
 

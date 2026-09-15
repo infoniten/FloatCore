@@ -26,6 +26,7 @@
 #define FC_PRIO_CONSOLE 4     // read-only CLI, ядро 0
 #define FC_PRIO_IMU_STRESS 5  // стресс-тест шины I2C, ядро 0 (см. fc_imu_stress.c)
 #define FC_PRIO_CAN_RX 6      // пассивный приём CAN, ядро 0 (см. fc_can_bus.c)
+#define FC_PRIO_LOG_DRAIN 3   // печать отложенных записей, ядро 0 (см. fc_log_port.c)
 
 // Refloat просит 1536 байт стека — этого мало для Xtensa (docs/vesc_if_contract.md §2).
 #define FC_STACK_SCALE 8
@@ -74,6 +75,16 @@ typedef struct {
 } FcTimingStats;
 
 void fc_timing_reset(void);
+
+/**
+ * Закрыть фазу загрузки: текущие счётчики уходят в снимок, новые считаются с
+ * нуля (ТЗ v0.7C §7). Печать баннера и инициализация неизбежно задерживают
+ * контур, и держать это в одной статистике с установившимся режимом значило
+ * бы навсегда спрятать в ней один пропуск дедлайна.
+ */
+void fc_timing_mark_steady(void);
+bool fc_timing_is_steady(void);
+FcTimingStats fc_timing_get_boot(FcTimingChannel ch);
 /** Отметить итерацию канала. Вызывается из RT-пути: без аллокаций и печати. */
 void fc_timing_tick(FcTimingChannel ch);
 void fc_timing_set_nominal(FcTimingChannel ch, uint32_t period_us);
