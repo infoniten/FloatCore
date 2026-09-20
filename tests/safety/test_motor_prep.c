@@ -208,15 +208,16 @@ static void test_motor_model(void) {
     const FcMotorParam *all = fc_motor_model_all(&n);
     check(n > 0 && all != NULL, "таблица параметров не пуста");
 
-    // После v0.8A половины различаются: к 118 подключён мотор и её параметры
-    // измерены, у 100 мотора нет. Проверяем именно это различие, а не
-    // усреднённое «доверие» — усреднение скрыло бы, что готова только одна.
+    // После v0.8B обе половины квалифицированы физически. Проверяем каждую
+    // ОТДЕЛЬНО, а не усреднённое «доверие»: усреднение скрыло бы случай, когда
+    // готова только одна. И проверяем, что совпадение значений получено
+    // измерением на каждой, а не копированием с соседней половины.
     const FcMotorParam *poles = fc_motor_model_find("si_motor_poles");
     check(poles != NULL, "число полюсов есть в модели");
     check(poles->value_a == 30.0f, "у половины A измерено 30 полюсов");
     check(poles->trust_a == FC_PARAM_VERIFIED, "полюса подтверждены на моторе A");
-    check(poles->value_b == 14.0f && poles->trust_b == FC_PARAM_UNVERIFIED,
-          "у половины B по-прежнему 14 и НЕ подтверждено");
+    check(poles->value_b == 30.0f && poles->trust_b == FC_PARAM_VERIFIED,
+          "у половины B тоже измерено 30 и подтверждено (v0.8B)");
     check(poles->kind == FC_PARAM_CONFIGURED,
           "число полюсов — введённое значение: детекция FOC его не определяет");
     note("критерий: %s", poles->verify_criterion);
@@ -226,14 +227,21 @@ static void test_motor_model(void) {
     check(flux->value_a > 0.015f && flux->value_a < 0.025f,
           "у половины A измерено около 19.6 мВб");
     check(flux->trust_a == FC_PARAM_VERIFIED, "потокосцепление подтверждено на моторе A");
-    check(flux->value_b == 0.1f && flux->trust_b == FC_PARAM_UNVERIFIED,
-          "у половины B осталось 0.1 и НЕ подтверждено");
+    check(flux->value_b > 0.015f && flux->value_b < 0.025f &&
+              flux->trust_b == FC_PARAM_VERIFIED,
+          "у половины B измерено около 20 мВб и подтверждено (v0.8B)");
+    // Моторы не объявляются идентичными: значения ИЗМЕРЕНЫ порознь и потому
+    // обязаны различаться. Точное совпадение означало бы копирование.
+    check(flux->value_a != flux->value_b,
+          "потокосцепление половин измерено порознь, а не скопировано");
 
     const FcMotorParam *r = fc_motor_model_find("foc_motor_r");
     check(r != NULL && r->trust_a == FC_PARAM_VERIFIED,
           "сопротивление подтверждено детекцией на моторе A");
     check(r->trust_b == FC_PARAM_READ_FROM_ESC,
           "у половины B сопротивление только прочитано");
+    check(r->value_a != r->value_b,
+          "сопротивление половин не усреднялось и не копировалось");
 
     const FcMotorParam *cells = fc_motor_model_find("si_battery_cells");
     check(cells != NULL && cells->value_a == 10.0f && cells->value_b == 10.0f,
@@ -245,7 +253,8 @@ static void test_motor_model(void) {
     check(imax != NULL && imax->kind == FC_PARAM_SAFETY_POLICY,
           "предел тока — решение о безопасности, а не свойство мотора");
     check(imax->value_a == 5.0f, "на половине A стоит временный предел прокрута 5 А");
-    check(imax->value_b == 25.0f, "на половине B рабочие 25 А не менялись");
+    check(imax->value_b == 5.0f,
+          "на половине B тот же временный предел прокрута 5 А (v0.8B)");
     check(!imax->must_refresh_after_detection, "детекция не должна менять предел тока");
 
     const FcMotorParam *wheel = fc_motor_model_find("si_wheel_diameter");
