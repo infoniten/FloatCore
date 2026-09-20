@@ -30,6 +30,8 @@
 #include "fc_can_bus.h"
 #include "../../../compat/config/floatcore_limits.h"
 #include "fc_gap_port.h"
+#include "fc_limits_sync.h"
+#include "../../../compat/config/floatcore_limits.h"
 #include "fc_log_port.h"
 #include "fc_motor_experiment.h"
 #include "../../../compat/diag/fc_gap_trace.h"
@@ -1167,6 +1169,7 @@ static void cmd_help(void) {
     printf("зазоры IMU:              gaps [порог_мкс] | gaps-reset | imu-stall-confirm <мс>\n");
     printf("политика IMU:            imu-policy | imu-accel-low-confirm <N>\n");
     printf("теневая команда:         shadow | shadow-tail [N] | shadow-reset\n");
+    printf("пределы тока:            limits | limits-sync\n");
 #if FC_MOTOR_BACKEND_AVAILABLE
     printf("МОТОРНЫЙ СТЕНД (колесо вывешено!):\n");
     printf("                         motor-status | motor-arm | motor-disarm\n");
@@ -1428,12 +1431,42 @@ static void cmd_shadow(void) {
     printf("  переходов через ноль %llu, в насыщении %llu (%.1f %%)\n",
            (unsigned long long) s.zero_crossings, (unsigned long long) s.saturation_samples,
            100.0 * (double) s.saturation_samples / n);
+    printf("  при пределе %.2f А: неэффективно %llu (%.1f %%), переход %llu (%.1f %%),"
+           " действенно %llu (%.1f %%), в упоре %llu (%.1f %%)\n",
+           (double) fc_shadow_envelope(), (unsigned long long) s.env_ineffective,
+           100.0 * (double) s.env_ineffective / n, (unsigned long long) s.env_transition,
+           100.0 * (double) s.env_transition / n, (unsigned long long) s.env_effective,
+           100.0 * (double) s.env_effective / n, (unsigned long long) s.env_saturated,
+           100.0 * (double) s.env_saturated / n);
     printf("  разрешено к передаче %llu — источник Refloat в маску гейта не входит\n",
            (unsigned long long) s.deliverable_samples);
     if (s.have_pitch) {
         printf("  крайние углы    %.2f° → %.3f А;  %.2f° → %.3f А\n", (double) s.min_pitch,
                (double) s.current_at_min_pitch, (double) s.max_pitch,
                (double) s.current_at_max_pitch);
+    }
+    printf("  по углам (|ошибка тангажа|):\n");
+    float lo = 0.0f;
+    for (unsigned i = 0; i < FC_SHADOW_ANGLE_BINS; ++i) {
+        if (s.bin_n[i] == 0) {
+            lo = FC_SHADOW_ANGLE_EDGES[i];
+            continue;
+        }
+        double bn = (double) s.bin_n[i];
+        if (i + 1 == FC_SHADOW_ANGLE_BINS) {
+            printf("    >%.1f°%14s n=%-8llu средний |I| %6.3f  упор ESC %5.1f %%  упор опыта %5.1f %%\n",
+                   (double) lo, "", (unsigned long long) s.bin_n[i],
+                   (double) (s.bin_sum_raw[i] / (float) bn),
+                   100.0 * (double) s.bin_saturated_esc[i] / bn,
+                   100.0 * (double) s.bin_saturated_env[i] / bn);
+        } else {
+            printf("    %.1f-%.1f°%11s n=%-8llu средний |I| %6.3f  упор ESC %5.1f %%  упор опыта %5.1f %%\n",
+                   (double) lo, (double) FC_SHADOW_ANGLE_EDGES[i], "",
+                   (unsigned long long) s.bin_n[i], (double) (s.bin_sum_raw[i] / (float) bn),
+                   100.0 * (double) s.bin_saturated_esc[i] / bn,
+                   100.0 * (double) s.bin_saturated_env[i] / bn);
+        }
+        lo = FC_SHADOW_ANGLE_EDGES[i];
     }
     printf("  история         прорежена 1:%u, глубина %.1f с\n",
            (unsigned) FC_SHADOW_DECIMATION,
@@ -1464,6 +1497,33 @@ static void cmd_shadow_tail(const char *arg) {
 static void cmd_shadow_reset(void) {
     fc_shadow_reset();
     printf("теневая статистика обнулена\n");
+}
+
+
+static void cmd_limits(void) {
+    FcLimitsSyncStatus st = fc_limits_sync_status();
+    printf("иерархия пределов тока (мотор, А)\n");
+    printf("  1 конфигурация ESC   118 %+.2f/%+.2f   100 %+.2f/%+.2f   %s\n",
+           (double) st.half[0].current_max, (double) st.half[0].current_min,
+           (double) st.half[1].current_max, (double) st.half[1].current_min,
+           (st.half[0].valid && st.half[1].valid) ? "прочитано" : "НЕ ПРОЧИТАНО");
+    printf("  2 общее пересечение  %+.2f/%+.2f %s\n", (double) st.common.current_max,
+           (double) st.common.current_min, st.common.valid ? "" : "(недоступно)");
+    printf("  3 предел опыта       %+.2f/%+.2f (только теневой разбор)\n",
+           (double) fc_shadow_envelope(), (double) -fc_shadow_envelope());
+    float seen_max = 0.0f, seen_min = 0.0f;
+    fc_vesc_if_limits_seen(&seen_max, &seen_min);
+    printf("  4 видит Refloat      %+.2f/%+.2f   (модель даёт %+.2f/%+.2f)\n", (double) seen_max,
+           (double) seen_min, (double) fc_effective_current_max(),
+           (double) fc_effective_current_min());
+    printf("  синхронизаций        попыток %" PRIu32 ", удачных %" PRIu32 ", применено %s\n",
+           st.attempts, st.successes, st.applied ? "да" : "нет");
+}
+
+static void cmd_limits_sync(void) {
+    printf(fc_limits_sync() ? "пределы синхронизированы\n"
+                            : "синхронизация НЕ удалась, значения не менялись\n");
+    cmd_limits();
 }
 
 static void dispatch(const char *line) {
@@ -1580,6 +1640,10 @@ static void dispatch(const char *line) {
         cmd_shadow();
     } else if (!strcmp(line, "shadow-reset")) {
         cmd_shadow_reset();
+    } else if (!strcmp(line, "limits")) {
+        cmd_limits();
+    } else if (!strcmp(line, "limits-sync")) {
+        cmd_limits_sync();
     } else if (!strncmp(line, "shadow-tail", 11) && (line[11] == 0 || line[11] == ' ')) {
         cmd_shadow_tail(line[11] == ' ' ? line + 12 : NULL);
 #if FC_LAB_DIAGNOSTICS

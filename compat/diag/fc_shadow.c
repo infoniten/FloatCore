@@ -3,6 +3,8 @@
 #include <math.h>
 #include <string.h>
 
+const float FC_SHADOW_ANGLE_EDGES[FC_SHADOW_ANGLE_BINS] = {0.1f, 0.2f, 0.3f, 0.5f, 1.0f, 1e9f};
+
 static struct {
     FcShadowSample ring[FC_SHADOW_RING];
     uint32_t head;
@@ -12,10 +14,33 @@ static struct {
     bool have_prev;
     bool in_deadzone;
     uint32_t decim;
+    float envelope;
+    float esc_limit;
 } S;
 
 void fc_shadow_init(void) {
+    float env = S.envelope;
+    float esc = S.esc_limit;
     memset(&S, 0, sizeof S);
+    S.esc_limit = esc > 0.0f ? esc : 5.0f;
+    S.envelope = env > 0.0f ? env : 0.5f;
+    S.esc_limit = 5.0f;
+}
+
+void fc_shadow_set_esc_limit(float amps) {
+    if (amps > 0.0f) {
+        S.esc_limit = amps;
+    }
+}
+
+void fc_shadow_set_envelope(float amps) {
+    if (amps > 0.0f) {
+        S.envelope = amps;
+    }
+}
+
+float fc_shadow_envelope(void) {
+    return S.envelope;
 }
 
 void fc_shadow_reset(void) {
@@ -77,6 +102,37 @@ void fc_shadow_record(const FcShadowSample *s) {
         float growth = fabsf(s->pid_i - S.st.i_term_at_deadzone_entry);
         if (growth > S.st.max_i_growth_in_deadzone) {
             S.st.max_i_growth_in_deadzone = growth;
+        }
+    }
+
+    // Что дошло бы до мотора при экспериментальном пределе.
+    float eff = a < S.envelope ? a : S.envelope;
+    if (eff >= S.envelope) {
+        ++S.st.env_saturated;
+    } else if (eff < FC_SHADOW_DEADZONE_LOW_A) {
+        ++S.st.env_ineffective;
+    } else if (eff <= FC_SHADOW_DEADZONE_HIGH_A) {
+        ++S.st.env_transition;
+    } else {
+        ++S.st.env_effective;
+    }
+
+    // Корзины по модулю ошибки угла.
+    float err = s->pitch - s->setpoint;
+    if (err < 0.0f) {
+        err = -err;
+    }
+    for (unsigned i = 0; i < FC_SHADOW_ANGLE_BINS; ++i) {
+        if (err < FC_SHADOW_ANGLE_EDGES[i]) {
+            ++S.st.bin_n[i];
+            S.st.bin_sum_raw[i] += a;
+            if (a >= S.esc_limit) {
+                ++S.st.bin_saturated_esc[i];
+            }
+            if (a >= S.envelope) {
+                ++S.st.bin_saturated_env[i];
+            }
+            break;
         }
     }
 

@@ -147,15 +147,34 @@ static void if_sleep_us(uint32_t us) {
         // вычитает из следующего сна время итерации, эта задержка напрямую
         // замедляла контур: 500 Гц по замыслу давали 400 по факту.
         //
-        // Период выводится из ПЕРВОГО запроса потока: главный поток на первой
-        // итерации просит полный период без компенсации (main.c:770), а
-        // вспомогательный просит константу всегда (main.c:1143). Дальше
-        // запрошенное значение игнорируется намеренно — компенсацию делает
-        // сам xTaskDelayUntil, и делать её дважды значило бы ускорять цикл.
-        if (t->period_ticks == 0) {
-            uint32_t ticks = (us + 500u) / 1000u;
-            t->period_ticks = ticks ? ticks : 1;
-            t->last_wake = xTaskGetTickCount();
+        // Период выводится из МАКСИМУМА запросов, а не из первого.
+        //
+        // Почему не из первого, как было до v0.9E. Главный поток на первой
+        // итерации действительно просит полный период (main.c:770), но к
+        // моменту, когда поток появляется в нашей таблице, эта итерация
+        // может быть уже позади — и тогда защёлкивался скомпенсированный
+        // запрос. На плате это дало период 1000 мкс вместо 2000: Refloat
+        // вычитает из запроса время своей итерации (main.c:1058-1059), а
+        // стартовые итерации медленные. Обратной дороги не было, потому что
+        // дальше us игнорировался.
+        //
+        // Максимум корректен по построению: Refloat из номинала только
+        // ВЫЧИТАЕТ, никогда не добавляет, поэтому ни один запрос не может
+        // превысить номинальный период. Схема самокорректирующаяся и не
+        // зависит от того, на какой итерации поток попал в таблицу.
+        //
+        // Компенсацию по-прежнему делает xTaskDelayUntil: отметка
+        // абсолютная, и вычитать время итерации второй раз значило бы
+        // ускорять цикл вдвое.
+        uint32_t want = (us + 500u) / 1000u;
+        if (want == 0) {
+            want = 1;
+        }
+        if (want > t->period_ticks) {
+            t->period_ticks = want;
+            if (t->last_wake == 0) {
+                t->last_wake = xTaskGetTickCount();
+            }
         }
         uint64_t t_sleep0 = (uint64_t) esp_timer_get_time();
         BaseType_t slept = xTaskDelayUntil(&t->last_wake, t->period_ticks);
@@ -199,6 +218,25 @@ static float if_system_time(void) {
 
 static systime_t if_system_time_ticks(void) {
     return (systime_t) (esp_timer_get_time() / 100);
+}
+
+void fc_vesc_if_limits_seen(float *max_a, float *min_a) {
+    if (max_a) {
+        *max_a = S.cfg_float[CFG_PARAM_l_current_max];
+    }
+    if (min_a) {
+        *min_a = S.cfg_float[CFG_PARAM_l_current_min];
+    }
+}
+
+void fc_vesc_if_refresh_limits(void) {
+    // Единственное место, где зеркало «конфигурации ESC» для Refloat
+    // обновляется. Значения берутся из модели пределов, которая уже свела
+    // обе половины и собственные ограничения FloatCore к одному ответу.
+    S.cfg_float[CFG_PARAM_l_current_max] = fc_effective_current_max();
+    S.cfg_float[CFG_PARAM_l_current_min] = fc_effective_current_min();
+    S.cfg_float[CFG_PARAM_l_in_current_max] = fc_effective_in_current_max();
+    S.cfg_float[CFG_PARAM_l_in_current_min] = fc_effective_in_current_min();
 }
 
 static uint32_t if_timer_time_now(void) {
@@ -855,10 +893,17 @@ void fc_vesc_if_init(void) {
     // Значения «конфигурации ESC». ESC нет, поэтому это заведомо консервативные
     // числа; реальные придут по CAN на следующем этапе. Ток намеренно мал:
     // даже если бы выход существовал, Refloat не запросил бы много.
-    S.cfg_float[CFG_PARAM_l_current_max] = 10.0f;
-    S.cfg_float[CFG_PARAM_l_current_min] = -10.0f;
-    S.cfg_float[CFG_PARAM_l_in_current_max] = 10.0f;
-    S.cfg_float[CFG_PARAM_l_in_current_min] = -5.0f;
+    // Стартовые значения до первой синхронизации с ESC. Намеренно МАЛЫЕ:
+    // если по какой-то причине пределы так и не будут прочитаны, Refloat
+    // должен ошибаться в сторону осторожности, а не наоборот.
+    //
+    // До v0.9E здесь стояло 10 А с комментарием «реальные придут по CAN на
+    // следующем этапе». Этап наступил: fc_limits_sync() читает mcconf обеих
+    // половин и вызывает fc_vesc_if_refresh_limits().
+    S.cfg_float[CFG_PARAM_l_current_max] = 1.0f;
+    S.cfg_float[CFG_PARAM_l_current_min] = -1.0f;
+    S.cfg_float[CFG_PARAM_l_in_current_max] = 1.0f;
+    S.cfg_float[CFG_PARAM_l_in_current_min] = -1.0f;
     S.cfg_float[CFG_PARAM_l_temp_fet_start] = 85.0f;
     S.cfg_float[CFG_PARAM_l_temp_motor_start] = 85.0f;
     S.cfg_float[CFG_PARAM_l_max_duty] = 0.95f;

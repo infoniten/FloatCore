@@ -16,6 +16,7 @@
 #include "fc_can_bus.h"
 #include "../../../compat/config/floatcore_limits.h"
 #include "fc_gap_port.h"
+#include "fc_limits_sync.h"
 #include "fc_log_port.h"
 #include "fc_motor_experiment.h"
 #include "../../../compat/diag/fc_gap_trace.h"
@@ -327,6 +328,13 @@ void app_main(void) {
     //    отключён аппаратно (обоснование — fc_can_bus.h).
 #if FC_CAN_RX_AVAILABLE
     bool can_rx = fc_can_bus_start();
+
+    // Пределы читаются с реальных половин сразу после подъёма шины. До этого
+    // зеркало содержит заведомо малые значения: если синхронизация не
+    // удастся, Refloat должен ошибаться в сторону осторожности.
+    if (can_rx) {
+        (void) fc_limits_sync();
+    }
     printf("[floatcore] CAN: %s\n",
            can_rx ? "TWAI listen-only поднят, приём идёт"
                   : "TWAI НЕ поднялся — приём отсутствует");

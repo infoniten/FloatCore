@@ -38,6 +38,14 @@
 #define FC_SHADOW_RING 512u
 #define FC_SHADOW_DECIMATION 10u
 
+// Границы разбиения по модулю ошибки угла, градусы. Верхняя корзина —
+// «всё остальное».
+#define FC_SHADOW_ANGLE_BINS 6u
+extern const float FC_SHADOW_ANGLE_EDGES[FC_SHADOW_ANGLE_BINS];
+
+/** Предел ESC, по которому считается упор в корзинах. */
+void fc_shadow_set_esc_limit(float amps);
+
 typedef struct {
     uint64_t timestamp_us;
     float current;      // то, что запросил Refloat
@@ -79,12 +87,34 @@ typedef struct {
     float max_i_growth_in_deadzone;
     uint64_t deadzone_entries;
 
+    // Взаимодействие мёртвой зоны и экспериментального предела (ТЗ §14).
+    // Считается по величине, которая ДОШЛА БЫ до мотора: min(|запрос|,
+    // предел опыта) со знаком запроса.
+    uint64_t env_ineffective;  // < 0.30 А — физически неэффективно
+    uint64_t env_transition;   // 0.30…0.40 А
+    uint64_t env_effective;    // 0.40 А … предел, не в упоре
+    uint64_t env_saturated;    // в упоре в предел опыта
+
+    // Разбиение по модулю ошибки угла (ТЗ v0.9E §13). Вопрос, на который оно
+    // отвечает: при каких углах будущий замкнутый контур просто упрётся в
+    // предел, то есть выродится в релейный.
+    uint64_t bin_n[FC_SHADOW_ANGLE_BINS];
+    float bin_sum_raw[FC_SHADOW_ANGLE_BINS];       // сумма |запроса|
+    uint64_t bin_saturated_esc[FC_SHADOW_ANGLE_BINS];  // упор в предел ESC
+    uint64_t bin_saturated_env[FC_SHADOW_ANGLE_BINS];  // упор в предел опыта
+
     // Крайние углы и команда в них (ТЗ §9): при насыщении по всей развёртке
     // именно они показывают, где насыщение начинается.
     float min_pitch, max_pitch;
     float current_at_min_pitch, current_at_max_pitch;
     bool have_pitch;
 } FcShadowStats;
+
+// Экспериментальный предел (ТЗ v0.9E §9). НЕ предел ESC и не подменяет его:
+// он всегда строже и применяется ТОЛЬКО к теневому разбору. Физически ничего
+// не ограничивает, потому что физически ничего и не передаётся.
+void fc_shadow_set_envelope(float amps);
+float fc_shadow_envelope(void);
 
 void fc_shadow_init(void);
 void fc_shadow_reset(void);

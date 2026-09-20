@@ -211,7 +211,7 @@ host: $(HOST_BIN)
 SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(wildcard $(ROOT)/compat/imu/*.c) \
               $(wildcard $(ROOT)/compat/can/*.c) $(ROOT)/compat/vesc_protocol/packet.c \
               $(wildcard $(ROOT)/compat/motor/*.c) $(wildcard $(ROOT)/compat/log/*.c) \
-              $(wildcard $(ROOT)/compat/diag/*.c) \
+              $(wildcard $(ROOT)/compat/diag/*.c) $(ROOT)/compat/config/floatcore_limits.c \
               $(wildcard $(ROOT)/tests/safety/*.c) $(wildcard $(ROOT)/tests/imu/*.c) \
               $(ROOT)/tests/can/test_can.c
 SAFETY_OBJ := $(patsubst %,$(OBJ)/saf_%.o,$(notdir $(basename $(SAFETY_SRC))))
@@ -250,6 +250,10 @@ $(OBJ)/saf_%.o: $(ROOT)/compat/log/%.c
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 
 $(OBJ)/saf_%.o: $(ROOT)/compat/diag/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/saf_%.o: $(ROOT)/compat/config/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 
