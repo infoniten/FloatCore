@@ -7,6 +7,8 @@
 // Refloat, и наоборот. Единственный мост — compat/refloat_glue/refloat_facade.h.
 #pragma once
 
+#include "../../../compat/safety/fc_build_profile.h"
+
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -194,6 +196,7 @@ uint64_t fc_imu_rt_iterations(void);
 uint32_t fc_imu_rt_max_read_us(void);
 uint64_t fc_imu_rt_reinits(void);
 uint32_t fc_imu_rt_stack_watermark(void);
+
 void fc_imu_rt_inject_stall(int ms);
 // Статус постоянной калибровки (значения FcImuCalStatus из compat/imu).
 int fc_imu_rt_cal_status(void);

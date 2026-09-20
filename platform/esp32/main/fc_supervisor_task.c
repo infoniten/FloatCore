@@ -10,6 +10,7 @@
 // пренебрежимой.
 
 #include "fc_gap_port.h"
+#include "../../../compat/imu/fc_imu_pipeline.h"
 #include "fc_platform.h"
 
 #include "../../../compat/safety/fc_imu_health.h"
@@ -55,7 +56,19 @@ static void supervisor_task(void *arg) {
         // супервизор увидит это по таймауту тика. Отказом же считается
         // поломка живого датчика после того, как он однажды заработал.
         if (hs != FC_IMU_NOT_INITIALIZED) {
-            fc_supervisor_report_imu_healthy(imu_ok, now);
+            // Шкала берётся у её владельца — конвейера IMU, — а не хранится
+            // здесь отдельной копией. Смысл в том, чтобы снимок отказа
+            // содержал ровно те числа, которые видит трассировка зазоров.
+            FcImuTimeline tl = fc_imu_pipeline_timeline();
+            FcSupervisorImuTime st = {
+                .last_valid_us = tl.last_valid_us,
+                .prev_valid_us = tl.prev_valid_us,
+                .last_gap_us = tl.last_gap_us,
+                .sequence = tl.sequence,
+                .last_verdict = tl.last_verdict,
+                .last_poll_us = tl.last_poll_us,
+            };
+            fc_supervisor_report_imu(imu_ok, (uint32_t) hs, &st, now);
         }
 
         // Watchdog: срабатывание TWDT видно по причине предыдущего сброса и

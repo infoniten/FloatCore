@@ -86,6 +86,24 @@ static void cmd_supervisor(void) {
     printf("возраст IMU       худший наблюдавшийся %" PRIu32 " мкс; в момент отказа %" PRIu32
            " мкс (порог %d)\n",
            st.imu_worst_age_us, st.imu_stale_age_us, (int) FC_SUP_IMU_TIMEOUT_US);
+    if (st.imu_fault.cause != FC_IMU_FAULT_CAUSE_NONE) {
+        const FcImuFaultSnapshot *f = &st.imu_fault;
+        printf("снимок отказа IMU (первого, не последнего):\n");
+        printf("  причина         %s\n", fc_imu_fault_cause_name(f->cause));
+        printf("  здоровье        %s\n",
+               fc_imu_health_state_name((FcImuHealthState) f->health_state));
+        printf("  now             %llu мкс\n", (unsigned long long) f->now_us);
+        printf("  посл. принятый  %llu мкс, предыдущий %llu\n",
+               (unsigned long long) f->time.last_valid_us,
+               (unsigned long long) f->time.prev_valid_us);
+        printf("  возраст         %" PRIu32 " мкс, зазор %" PRIu32 " мкс\n",
+               f->computed_age_us, f->time.last_gap_us);
+        printf("  номер семпла    %" PRIu32 ", вердикт опроса %" PRIu32 ", опрос в %llu\n",
+               f->time.sequence, f->time.last_verdict,
+               (unsigned long long) f->time.last_poll_us);
+    } else {
+        printf("снимок отказа IMU отказа не было\n");
+    }
     printf("motor output      %s\n",
            fc_supervisor_motor_output_permitted() ? "РАЗРЕШЁН" : "запрещён");
     printf("config write      %s\n",
@@ -155,6 +173,11 @@ static void cmd_imu(void) {
            fc_imu_health_state_name(h.state), (unsigned long long) h.samples_total,
            (unsigned long long) h.read_errors, (unsigned long long) h.stuck_events,
            (unsigned long long) h.stale_events, (unsigned long long) h.timeout_events);
+    printf("  отвергнуто      %llu: |a| мало %llu, |a| велико %llu, гиро велико %llu"
+           " (последний |a| = %.3f g)\n",
+           (unsigned long long) h.invalid_samples, (unsigned long long) h.invalid_accel_low,
+           (unsigned long long) h.invalid_accel_high, (unsigned long long) h.invalid_gyro_high,
+           (double) h.last_invalid_accel_mag);
 
     // Тракт: сколько опросов во что превратилось. Именно здесь видно
     // соотношение «одна физическая выборка — одна итерация контура».
@@ -1131,7 +1154,7 @@ static void cmd_help(void) {
     printf("стресс-тест шины I2C:    imu_stress [сек] [кГц] [порог_сброса] | imu_stress-stop |\n");
     printf("                         imu_stress-log\n");
 #endif
-    printf("зазоры IMU:              gaps [порог_мкс] | gaps-reset\n");
+    printf("зазоры IMU:              gaps [порог_мкс] | gaps-reset | imu-stall-confirm <мс>\n");
 #if FC_MOTOR_BACKEND_AVAILABLE
     printf("МОТОРНЫЙ СТЕНД (колесо вывешено!):\n");
     printf("                         motor-status | motor-arm | motor-disarm\n");
@@ -1291,6 +1314,22 @@ static void cmd_motor_reset(void) {
 
 #endif // FC_MOTOR_BACKEND_AVAILABLE
 
+
+#if FC_LAB_DIAGNOSTICS
+static void cmd_imu_stall(const char *arg) {
+    uint32_t ms = arg && *arg ? (uint32_t) strtoul(arg, NULL, 10) : 0;
+    if (ms == 0 || ms > 500) {
+        printf("imu-stall-confirm <мс 1..500>\n");
+        printf("  задерживает задачу чтения IMU ровно один раз.\n");
+        printf("  свыше %d мс обязано дать IMU_UNHEALTHY по возрасту.\n",
+               (int) (FC_SUP_IMU_TIMEOUT_US / 1000));
+        return;
+    }
+    fc_imu_rt_inject_stall((int) ms);
+    printf("задержка %" PRIu32 " мс запрошена; смотреть gaps и supervisor\n", ms);
+}
+#endif
+
 static void dispatch(const char *line) {
     if (!strcmp(line, "status")) {
         cmd_status();
@@ -1401,6 +1440,11 @@ static void dispatch(const char *line) {
         cmd_gaps(line[4] == ' ' ? line + 5 : NULL);
     } else if (!strcmp(line, "gaps-reset")) {
         cmd_gaps_reset();
+#if FC_LAB_DIAGNOSTICS
+    } else if (!strncmp(line, "imu-stall-confirm", 17) &&
+               (line[17] == 0 || line[17] == ' ')) {
+        cmd_imu_stall(line[17] == ' ' ? line + 18 : NULL);
+#endif
 #if FC_MOTOR_BACKEND_AVAILABLE
     } else if (!strcmp(line, "motor-status")) {
         cmd_motor_status();

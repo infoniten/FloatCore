@@ -70,6 +70,41 @@ typedef struct {
     bool thermal_ok;         // true
 } FcSupervisorInputs;
 
+// ------------------------------------- снимок отказа IMU (ТЗ v0.9B §4)
+//
+// В отказ IMU_UNHEALTHY ведут ДВА независимых пути, и до v0.9B нельзя было
+// узнать, какой сработал. Это и породило мнимое противоречие приборов:
+// трассировка не видела зазоров больше 12.7 мс, супервизор «отказывал по
+// возрасту больше 40 мс», а на деле возраст не проверялся вовсе — отказ
+// приходил от состояния модуля здоровья после одиночного сбоя чтения.
+//
+// Разбор — docs/imu_time_model.md.
+typedef enum {
+    FC_IMU_FAULT_CAUSE_NONE = 0,
+    FC_IMU_FAULT_CAUSE_AGE,          // возраст принятого семпла превысил порог
+    FC_IMU_FAULT_CAUSE_HEALTH_STATE, // модуль здоровья вернул состояние не OK
+} FcImuFaultCause;
+
+// Зеркало канонической шкалы (владелец — конвейер IMU). Здесь оно существует
+// только чтобы снимок отказа содержал те же числа, что и трассировка, а не
+// собственную версию событий.
+typedef struct {
+    uint64_t last_valid_us;
+    uint64_t prev_valid_us;
+    uint32_t last_gap_us;
+    uint32_t sequence;
+    uint32_t last_verdict;
+    uint64_t last_poll_us;
+} FcSupervisorImuTime;
+
+typedef struct {
+    FcImuFaultCause cause;
+    uint32_t health_state;     // состояние модуля здоровья в момент отказа
+    uint64_t now_us;
+    uint32_t computed_age_us;  // now - last_valid, как его посчитал супервизор
+    FcSupervisorImuTime time;
+} FcImuFaultSnapshot;
+
 typedef struct {
     FcSupervisorState state;
     uint32_t faults;              // маска FcSupervisorFault
@@ -86,6 +121,7 @@ typedef struct {
     // одновременно, и без этого числа нельзя сказать, чьё ошибочно.
     uint32_t imu_stale_age_us;
     uint32_t imu_worst_age_us;  // худший наблюдавшийся возраст, вне зависимости от отказа
+    FcImuFaultSnapshot imu_fault;  // снимок ПЕРВОГО отказа IMU, не последнего
     FcSupervisorInputs inputs;
 } FcSupervisorStatus;
 
@@ -147,6 +183,17 @@ void fc_supervisor_poll(uint64_t now_us);
  * автоматического восстановления нет намеренно (ТЗ v0.6 §10).
  */
 bool fc_supervisor_clear_fault(uint64_t now_us);
+
+/**
+ * Сообщить состояние IMU вместе с канонической шкалой времени.
+ *
+ * Заменяет fc_supervisor_report_imu_healthy(): та форма не позволяла
+ * записать, ПОЧЕМУ отказ произошёл, и оставляла снимок пустым.
+ */
+void fc_supervisor_report_imu(bool healthy, uint32_t health_state,
+                              const FcSupervisorImuTime *t, uint64_t now_us);
+
+const char *fc_imu_fault_cause_name(FcImuFaultCause c);
 
 FcSupervisorStatus fc_supervisor_status(void);
 FcSupervisorState fc_supervisor_state(void);

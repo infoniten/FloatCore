@@ -5,6 +5,8 @@
 
 #define DEG2RAD 0.017453292519943295f
 
+static FcImuTimeline TL;
+
 static struct {
     FcImuPipelineConfig cfg;
     FcImuPipelineStats st;
@@ -42,6 +44,7 @@ FcImuPipelineConfig fc_imu_pipeline_default_config(uint32_t nominal_period_us) {
 }
 
 void fc_imu_pipeline_init(const FcImuPipelineConfig *cfg, const FcImuHealthConfig *health) {
+    memset(&TL, 0, sizeof TL);
     memset(&P, 0, sizeof(P));
     P.cfg = *cfg;
     P.st.min_gap_us = UINT64_MAX;
@@ -85,8 +88,10 @@ FcImuPipeVerdict fc_imu_pipeline_submit(
     uint64_t now_us
 ) {
     ++P.st.polls;
+    TL.last_poll_us = now_us;
 
     if (!read_ok) {
+        TL.last_verdict = (uint32_t) FC_IMU_PIPE_READ_FAILED;
         ++P.st.read_failures;
         // Диагностика обязана узнать о неудачной транзакции немедленно:
         // именно по ней супервизор поднимает отказ.
@@ -126,6 +131,7 @@ FcImuPipeVerdict fc_imu_pipeline_submit(
             memset(&empty, 0, sizeof(empty));
             fc_imu_health_update(false, &empty, now_us);
         }
+        TL.last_verdict = (uint32_t) FC_IMU_PIPE_DUPLICATE;
         return FC_IMU_PIPE_DUPLICATE;
     }
 
@@ -164,6 +170,7 @@ FcImuPipeVerdict fc_imu_pipeline_submit(
     FcImuHealthState hs = fc_imu_health_update(true, &raw, now_us);
     if (hs != FC_IMU_OK) {
         ++P.st.rejected;
+        TL.last_verdict = (uint32_t) FC_IMU_PIPE_REJECTED;
         return FC_IMU_PIPE_REJECTED;
     }
 
@@ -265,7 +272,22 @@ FcImuPipeVerdict fc_imu_pipeline_submit(
     P.sample = s;
     P.have_sample = true;
     ++P.st.accepted;
+
+    // Каноническая шкала обновляется ТОЛЬКО здесь — на принятом семпле, и
+    // ровно той отметкой, которая ушла в Refloat. Любое другое место
+    // обновления снова развело бы показания приборов.
+    TL.prev_valid_us = TL.last_valid_us;
+    TL.last_valid_us = s.timestamp_us;
+    TL.last_gap_us = (TL.prev_valid_us && s.timestamp_us > TL.prev_valid_us)
+                         ? (uint32_t) (s.timestamp_us - TL.prev_valid_us)
+                         : 0;
+    ++TL.sequence;
+    TL.last_verdict = (uint32_t) FC_IMU_PIPE_ACCEPTED;
     return FC_IMU_PIPE_ACCEPTED;
+}
+
+FcImuTimeline fc_imu_pipeline_timeline(void) {
+    return TL;
 }
 
 FcImuSample fc_imu_pipeline_sample(void) {

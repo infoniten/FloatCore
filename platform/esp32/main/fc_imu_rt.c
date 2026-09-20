@@ -106,7 +106,6 @@ static struct {
     uint32_t consecutive_failures;
     uint64_t reinits;
     uint64_t last_reinit_us;
-    uint64_t last_accepted_us;
     uint32_t max_read_us;
     uint64_t iterations;
 
@@ -182,7 +181,11 @@ static void imu_rt_task(void *arg) {
         vTaskDelayUntil(&next, FC_IMU_RT_POLL_TICKS);
 
         if (R.stall_ms) {
-            // Проверка watchdog: контур намеренно перестаёт отмечаться.
+            // Задержка задачи чтения на известное время. Служит двум целям:
+            // проверке watchdog (контур намеренно перестаёт отмечаться) и,
+            // с v0.9B, сверке показаний приборов — трассировка зазоров и
+            // возраст семпла у супервизора обязаны показать одно и то же
+            // число (ТЗ v0.9B §6).
             int ms = R.stall_ms;
             R.stall_ms = 0;
             vTaskDelay(pdMS_TO_TICKS(ms));
@@ -249,22 +252,20 @@ static void imu_rt_task(void *arg) {
         // --- принятый физический семпл: ровно одна итерация контура --------
         FcImuSample sample = fc_imu_pipeline_sample();
 
-        // Трассировка длинных зазоров (ТЗ v0.9A §3). Считается ЗДЕСЬ, между
-        // принятыми семплами, потому что именно этот интервал видит Refloat:
-        // отвергнутый или сдублированный семпл до него не доходит.
+        // Трассировка длинных зазоров (ТЗ v0.9A §3, v0.9B §4).
+        //
+        // Собственной копии «последнего времени» здесь больше НЕТ: интервал
+        // берётся из канонической шкалы конвейера. Пока таких копий было
+        // несколько, показания трассировки и супервизора нельзя было
+        // сопоставлять, и это породило мнимое противоречие приборов
+        // (docs/imu_time_model.md).
         //
         // Дешёвая проверка порога — в горячем пути; сбор снимка происходит
         // только когда порог превышен, то есть в среднем никогда.
-        if (R.last_accepted_us != 0) {
-            uint64_t d = sample.timestamp_us > R.last_accepted_us
-                             ? sample.timestamp_us - R.last_accepted_us
-                             : 0;
-            if (d > 0xFFFFFFFFull) {
-                d = 0xFFFFFFFFull;
-            }
-            fc_gap_port_capture(sample.timestamp_us, R.last_accepted_us, (uint32_t) d);
+        FcImuTimeline tl = fc_imu_pipeline_timeline();
+        if (tl.prev_valid_us != 0) {
+            fc_gap_port_capture(tl.last_valid_us, tl.prev_valid_us, tl.last_gap_us);
         }
-        R.last_accepted_us = sample.timestamp_us;
 
         fc_timing_tick(FC_TIMING_CONTROL);
         fc_supervisor_report_loop_tick(sample.timestamp_us);

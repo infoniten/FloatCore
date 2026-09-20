@@ -24,6 +24,8 @@ static struct {
     uint32_t fault_entries;
     uint32_t imu_stale_age_us;
     uint32_t imu_worst_age_us;
+    FcSupervisorImuTime imu_time;
+    FcImuFaultSnapshot imu_fault;
     FcSupervisorInputs in;
     bool loop_tick_seen;
     bool imu_sample_seen;
@@ -115,10 +117,48 @@ void fc_supervisor_report_imu_sample(uint64_t now_us) {
     S.imu_sample_seen = true;
 }
 
-void fc_supervisor_report_imu_healthy(bool healthy, uint64_t now_us) {
+// Снимок пишется ТОЛЬКО для первого отказа. Последующие ничего не добавляют:
+// после защёлкивания состояние уже не то, в котором отказ возник, и перезапись
+// снимка стёрла бы единственное свидетельство причины.
+static void capture_imu_fault(FcImuFaultCause cause, uint32_t health_state, uint64_t now_us,
+                              uint32_t age_us) {
+    if (S.imu_fault.cause != FC_IMU_FAULT_CAUSE_NONE) {
+        return;
+    }
+    S.imu_fault.cause = cause;
+    S.imu_fault.health_state = health_state;
+    S.imu_fault.now_us = now_us;
+    S.imu_fault.computed_age_us = age_us;
+    S.imu_fault.time = S.imu_time;
+}
+
+void fc_supervisor_report_imu(bool healthy, uint32_t health_state,
+                              const FcSupervisorImuTime *t, uint64_t now_us) {
+    if (t) {
+        S.imu_time = *t;
+    }
     S.in.imu_healthy = healthy;
     if (!healthy) {
+        uint64_t age = (S.imu_time.last_valid_us && now_us > S.imu_time.last_valid_us)
+                           ? now_us - S.imu_time.last_valid_us
+                           : 0;
+        if (age > 0xFFFFFFFFull) {
+            age = 0xFFFFFFFFull;
+        }
+        capture_imu_fault(FC_IMU_FAULT_CAUSE_HEALTH_STATE, health_state, now_us, (uint32_t) age);
         enter_fault(FC_FAULT_IMU_UNHEALTHY, now_us);
+    }
+}
+
+void fc_supervisor_report_imu_healthy(bool healthy, uint64_t now_us) {
+    fc_supervisor_report_imu(healthy, 0, NULL, now_us);
+}
+
+const char *fc_imu_fault_cause_name(FcImuFaultCause c) {
+    switch (c) {
+    case FC_IMU_FAULT_CAUSE_AGE: return "возраст семпла превысил порог";
+    case FC_IMU_FAULT_CAUSE_HEALTH_STATE: return "модуль здоровья вернул не OK";
+    default: return "отказа IMU не было";
     }
 }
 
@@ -187,6 +227,7 @@ void fc_supervisor_poll(uint64_t now_us) {
     }
     if (S.imu_sample_seen && now_us - S.last_imu_sample_us > FC_SUP_IMU_TIMEOUT_US) {
         S.imu_stale_age_us = (uint32_t) (now_us - S.last_imu_sample_us);
+        capture_imu_fault(FC_IMU_FAULT_CAUSE_AGE, 0, now_us, S.imu_stale_age_us);
         S.in.imu_healthy = false;
         if (S.state == FC_SUP_DISARMED || S.state == FC_SUP_READY || S.state == FC_SUP_ARMED ||
             S.state == FC_SUP_RUNNING) {
@@ -201,6 +242,11 @@ void fc_supervisor_poll(uint64_t now_us) {
 }
 
 bool fc_supervisor_clear_fault(uint64_t now_us) {
+    // Снимок описывает ЭПИЗОД отказа. Снятие отказа эпизод закрывает, значит
+    // снимок надо освободить — иначе следующий, настоящий отказ окажется
+    // нечем объяснить, а место будет занято прошлым (ровно это и случилось
+    // на v0.9B: снимок держал мой же тест с задержкой 50 мс).
+    memset(&S.imu_fault, 0, sizeof S.imu_fault);
     if (S.state != FC_SUP_FAULT) {
         return true;
     }
@@ -245,6 +291,7 @@ FcSupervisorStatus fc_supervisor_status(void) {
     st.fault_entries = S.fault_entries;
     st.imu_stale_age_us = S.imu_stale_age_us;
     st.imu_worst_age_us = S.imu_worst_age_us;
+    st.imu_fault = S.imu_fault;
     st.inputs = S.in;
     return st;
 }

@@ -60,11 +60,19 @@ static bool sample_is_finite(const FcImuRawSample *s) {
 static bool sample_is_plausible(const FcImuHealthConfig *c, const FcImuRawSample *s) {
     float mag = sqrtf(s->accel_g[0] * s->accel_g[0] + s->accel_g[1] * s->accel_g[1] +
                       s->accel_g[2] * s->accel_g[2]);
-    if (mag < c->accel_mag_min_g || mag > c->accel_mag_max_g) {
+    if (mag < c->accel_mag_min_g) {
+        ++H.st.invalid_accel_low;
+        H.st.last_invalid_accel_mag = mag;
+        return false;
+    }
+    if (mag > c->accel_mag_max_g) {
+        ++H.st.invalid_accel_high;
+        H.st.last_invalid_accel_mag = mag;
         return false;
     }
     for (int i = 0; i < 3; ++i) {
         if (fabsf(s->gyro_dps[i]) > c->gyro_abs_max_dps) {
+            ++H.st.invalid_gyro_high;
             return false;
         }
     }
