@@ -310,6 +310,10 @@ can-negative-test:
 	    NEG_FILE=$(ROOT)/tests/can/negative_diag_in_passive.c \
 	    NEG_DEFS="-DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_PASSIVE=1" \
 	    NEG_WHAT="диагностическая передача в пассивном профиле"
+	@$(MAKE) --no-print-directory neg-one \
+	    NEG_FILE=$(ROOT)/tests/can/negative_dual_backend.c \
+	    NEG_DEFS="-DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_ACTIVE_DIAG=1" \
+	    NEG_WHAT="backend двух половин в лабораторном профиле"
 
 # Успех цели — это ПРОВАЛ компиляции. Формулировка неочевидная, поэтому цель
 # вынесена отдельно и печатает, что именно проверялось.
