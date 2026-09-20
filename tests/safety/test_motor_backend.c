@@ -11,6 +11,7 @@
 
 #include <math.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -394,11 +395,152 @@ static void test_no_physical_output(void) {
          fc_motor_gate_backend_name());
 }
 
+
+// -------------------------------------------- вооружение оператором (§11)
+
+static FcDualArmInputs all_ok(void) {
+    FcDualArmInputs a;
+    memset(&a, 0, sizeof a);
+    a.supervisor_healthy = true;
+    a.imu_healthy = true;
+    a.node_healthy[FC_DUAL_A] = true;
+    a.node_healthy[FC_DUAL_B] = true;
+    a.can_healthy = true;
+    a.battery_model_valid = true;
+    a.motor_model_valid = true;
+    a.boot_complete = true;
+    a.realtime_qualified = true;
+    return a;
+}
+
+static void test_arming(void) {
+    note("ВООРУЖЕНИЕ ОПЕРАТОРОМ (ТЗ v0.9A §11)");
+
+    // 3: после инициализации — обезоружено. Не «как было», не «если условия
+    // выполнены», а безусловно.
+    FcDualMotorConfig c = fc_dual_motor_default_config();
+    fc_dual_motor_init(&c);
+    check(!fc_dual_motor_stats().armed, "3 после инициализации система обезоружена");
+
+    FcDualMotorInputs in = healthy();
+    FcDualMotorPlan p = plan_of(&in);
+    check(!p.send && (p.deny_mask & (uint32_t) FC_DUAL_DENY_NOT_ARMED),
+          "3 без вооружения тяга запрещена даже при исправных входах");
+
+    // 4: вооружение — отдельное действие, и оно требует ВСЕХ условий.
+    uint32_t deny = 0;
+    FcDualArmInputs a = all_ok();
+    check(fc_dual_motor_try_arm(&a, &deny), "4 при всех выполненных условиях вооружение проходит");
+    check(deny == 0, "4 маска отказа пуста");
+
+    // Каждое условие поодиночке запрещает вооружение и называет себя.
+    struct {
+        const char *name;
+        size_t offset;
+        uint32_t bit;
+    } conds[] = {
+        {"supervisor", offsetof(FcDualArmInputs, supervisor_healthy), FC_DUAL_ARM_DENY_SUPERVISOR},
+        {"IMU", offsetof(FcDualArmInputs, imu_healthy), FC_DUAL_ARM_DENY_IMU},
+        {"узел A", offsetof(FcDualArmInputs, node_healthy[FC_DUAL_A]), FC_DUAL_ARM_DENY_NODE_A},
+        {"узел B", offsetof(FcDualArmInputs, node_healthy[FC_DUAL_B]), FC_DUAL_ARM_DENY_NODE_B},
+        {"CAN", offsetof(FcDualArmInputs, can_healthy), FC_DUAL_ARM_DENY_CAN},
+        {"батарея", offsetof(FcDualArmInputs, battery_model_valid),
+         FC_DUAL_ARM_DENY_BATTERY_MODEL},
+        {"мотор", offsetof(FcDualArmInputs, motor_model_valid), FC_DUAL_ARM_DENY_MOTOR_MODEL},
+        {"загрузка", offsetof(FcDualArmInputs, boot_complete), FC_DUAL_ARM_DENY_BOOT},
+        {"realtime", offsetof(FcDualArmInputs, realtime_qualified), FC_DUAL_ARM_DENY_REALTIME},
+    };
+    int denied = 0;
+    for (size_t i = 0; i < sizeof conds / sizeof conds[0]; ++i) {
+        fc_dual_motor_init(&c);
+        a = all_ok();
+        *((bool *) ((char *) &a + conds[i].offset)) = false;
+        deny = 0;
+        bool armed = fc_dual_motor_try_arm(&a, &deny);
+        char buf[160];
+        snprintf(buf, sizeof buf, "4 условие «%s» поодиночке запрещает вооружение", conds[i].name);
+        check(!armed && (deny & conds[i].bit), buf);
+        if (!armed) {
+            ++denied;
+        }
+    }
+    note("условий вооружения проверено поодиночке: %d", denied);
+
+    // 24: восстановление входов НЕ вооружает само.
+    fc_dual_motor_init(&c);
+    a = all_ok();
+    a.imu_healthy = false;
+    check(!fc_dual_motor_try_arm(&a, &deny), "24 при нездоровом IMU вооружения нет");
+    a.imu_healthy = true;
+    check(!fc_dual_motor_stats().armed,
+          "24 восстановление входа НЕ вооружает: нужно повторное действие оператора");
+
+    // 26: защёлка запрещает вооружение, пока не снята явно.
+    fc_dual_motor_init(&c);
+    fc_dual_motor_report_send(true, false, T0);
+    a = all_ok();
+    deny = 0;
+    check(!fc_dual_motor_try_arm(&a, &deny) && (deny & FC_DUAL_ARM_DENY_LATCHED),
+          "26 защёлкнутый отказ запрещает вооружение");
+    fc_dual_motor_clear_latch();
+    check(fc_dual_motor_try_arm(&a, &deny),
+          "26 после явного снятия защёлки вооружение возможно");
+
+    // 25: перезапуск возвращает в обезоруженное состояние.
+    fc_dual_motor_init(&c);
+    check(!fc_dual_motor_stats().armed, "25 перезапуск возвращает DISARMED");
+}
+
+// ------------------------------------------- источник команды в Motor Gate
+
+static void test_origin(void) {
+    note("ИСТОЧНИК КОМАНДЫ (ТЗ v0.9A §24: выход Refloat не подключён)");
+    fc_motor_gate_init();
+    check(fc_motor_gate_allowed_origins() == FC_GATE_ALLOWED_ORIGINS_V09A,
+          "по умолчанию допущен только экспериментальный источник");
+    check((fc_motor_gate_allowed_origins() & (1u << FC_MOTOR_ORIGIN_REFLOAT)) == 0,
+          "источник Refloat НЕ допущен до backend-а");
+
+    // В лабораторном профиле до источника дело не доходит: раньше отказывает
+    // состояние супервизора. Проверяем то, что проверяемо здесь, — что
+    // запрос Refloat не доходит до backend-а ни при каком исходе.
+    FcGateVerdict v = fc_motor_gate_request(FC_MOTOR_REQ_CURRENT, 0.5f, T0);
+    check(v != FC_GATE_ALLOWED, "запрос от Refloat не разрешён");
+    FcMotorGateStats g = fc_motor_gate_stats();
+    check(g.delivered_to_backend == 0, "до backend-а запрос Refloat не дошёл");
+    check(g.by_origin[FC_MOTOR_ORIGIN_REFLOAT] == 1, "источник учтён отдельно");
+    note("вердикт: %s", fc_motor_gate_verdict_name(v));
+}
+
+// ------------------------------------------- номера пар (ТЗ v0.9A §8)
+
+static void test_sequence(void) {
+    note("НОМЕРА ПАР");
+    fresh_start();
+    FcDualMotorInputs in = healthy();
+    FcDualMotorPlan a = plan_of(&in);
+    FcDualMotorPlan b = plan_of(&in);
+    check(a.send && b.send, "две пары разрешены");
+    check(b.sequence == a.sequence + 1, "номер растёт на единицу");
+
+    // Отказ номер НЕ тратит: разрыв означал бы «пара потерялась», а её не
+    // было вовсе.
+    in.supervisor_allows = false;
+    FcDualMotorPlan denied = plan_of(&in);
+    check(!denied.send && denied.sequence == 0, "у запрещённой пары номера нет");
+    in.supervisor_allows = true;
+    FcDualMotorPlan cc = plan_of(&in);
+    check(cc.sequence == b.sequence + 1, "отказ не тратит номер последовательности");
+}
+
 void test_motor_backend_all(void) {
     test_semantics();
     test_invariants();
     test_timing();
     test_fault_matrix();
     test_execute_and_skew();
+    test_arming();
+    test_origin();
+    test_sequence();
     test_no_physical_output();
 }

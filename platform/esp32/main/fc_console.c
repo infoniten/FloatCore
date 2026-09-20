@@ -29,7 +29,11 @@
 #include "fc_imu_cal_store.h"
 #include "fc_can_bus.h"
 #include "../../../compat/config/floatcore_limits.h"
+#include "fc_gap_port.h"
 #include "fc_log_port.h"
+#include "fc_motor_experiment.h"
+#include "../../../compat/diag/fc_gap_trace.h"
+#include "../../../compat/motor/fc_dual_motor.h"
 #include "fc_sched.h"
 #include "../../../compat/can/fc_vesc_can.h"
 #include "../../../compat/vesc_protocol/packet.h"
@@ -79,6 +83,9 @@ static void cmd_supervisor(void) {
            fc_supervisor_fault_name(st.faults), st.faults, st.faults_latched);
     printf("переходов         %" PRIu32 ", входов в FAULT %" PRIu32 "\n", st.transitions,
            st.fault_entries);
+    printf("возраст IMU       худший наблюдавшийся %" PRIu32 " мкс; в момент отказа %" PRIu32
+           " мкс (порог %d)\n",
+           st.imu_worst_age_us, st.imu_stale_age_us, (int) FC_SUP_IMU_TIMEOUT_US);
     printf("motor output      %s\n",
            fc_supervisor_motor_output_permitted() ? "РАЗРЕШЁН" : "запрещён");
     printf("config write      %s\n",
@@ -1124,10 +1131,165 @@ static void cmd_help(void) {
     printf("стресс-тест шины I2C:    imu_stress [сек] [кГц] [порог_сброса] | imu_stress-stop |\n");
     printf("                         imu_stress-log\n");
 #endif
+    printf("зазоры IMU:              gaps [порог_мкс] | gaps-reset\n");
+#if FC_MOTOR_BACKEND_AVAILABLE
+    printf("МОТОРНЫЙ СТЕНД (колесо вывешено!):\n");
+    printf("                         motor-status | motor-arm | motor-disarm\n");
+    printf("                         motor-run <А> <мс> | motor-stop\n");
+    printf("                         motor-clear-latch | motor-inject <маска> |\n");
+    printf("                         motor-reset-stats\n");
+#endif
     printf("профиль сборки:          %s\n", FC_PROFILE_NAME);
     printf("команд управления мотором нет: в этой сборке нет кода, способного что-либо\n");
     printf("отправить — см. docs/esp32_safety.md\n");
 }
+
+// ------------------------------------------- зазоры IMU и моторный стенд
+
+static void cmd_gaps(const char *arg) {
+    if (arg && *arg) {
+        uint32_t th = (uint32_t) strtoul(arg, NULL, 10);
+        if (th) {
+            fc_gap_trace_set_threshold(th);
+            printf("порог трассировки: %" PRIu32 " мкс\n", th);
+        }
+    }
+    fc_gap_port_print();
+}
+
+static void cmd_gaps_reset(void) {
+    fc_gap_trace_reset();
+    printf("трассировка зазоров: обнулена\n");
+}
+
+#if FC_MOTOR_BACKEND_AVAILABLE
+
+static void print_arm_deny(uint32_t mask) {
+    for (int b = 0; b < FC_DUAL_ARM_DENY_COUNT; ++b) {
+        if (mask & (1u << b)) {
+            printf("    - %s\n", fc_dual_motor_arm_deny_name((FcDualArmDeny) (1u << b)));
+        }
+    }
+}
+
+static void cmd_motor_status(void) {
+    FcMotorExpStats e = fc_motor_experiment_stats();
+    FcDualMotorStats d = fc_dual_motor_stats();
+    FcMotorGateStats g = fc_motor_gate_stats();
+    FcCanMotorStats m = fc_can_bus_motor_stats();
+
+    printf("профиль сборки    %s\n", FC_PROFILE_NAME);
+    printf("профиль CAN       %s\n", FC_CAN_PROFILE_NAME);
+    printf("вооружение        %s\n", d.armed ? "ВООРУЖЕНО" : "обезоружено");
+    printf("защёлка           %s\n", d.latched ? "ЗАЩЁЛКНУТА" : "нет");
+    printf("источник          %s, запрошено %.3f А, осталось %" PRIu32 " мс\n",
+           e.running ? "РАБОТАЕТ" : "остановлен", (double) e.requested_a, e.remaining_ms);
+    printf("программный предел %.2f А (предел ESC 5 А не трогаем)\n",
+           (double) FC_MOTOR_EXP_MAX_CURRENT_A);
+    printf("Motor Gate        запросов %llu, разрешено %llu, доставлено %llu, физически %llu\n",
+           (unsigned long long) g.requests_total, (unsigned long long) g.allowed_by_policy,
+           (unsigned long long) g.delivered_to_backend,
+           (unsigned long long) g.physically_sent);
+    printf("  отказы          origin %llu, disarmed %llu, fault %llu, invalid %llu, no_backend %llu\n",
+           (unsigned long long) g.rejected_origin, (unsigned long long) g.rejected_disarmed,
+           (unsigned long long) g.rejected_fault, (unsigned long long) g.rejected_invalid,
+           (unsigned long long) g.rejected_no_backend);
+    printf("  по источникам   refloat %llu, эксперимент %llu\n",
+           (unsigned long long) g.by_origin[FC_MOTOR_ORIGIN_REFLOAT],
+           (unsigned long long) g.by_origin[FC_MOTOR_ORIGIN_EXPERIMENT]);
+    printf("координатор       разрешено %llu, отказано %llu, частичных передач %llu\n",
+           (unsigned long long) d.permits_granted, (unsigned long long) d.permits_denied,
+           (unsigned long long) d.partial_sends);
+    if (d.last_deny_mask) {
+        printf("  последний отказ:\n");
+        for (int b = 0; b < FC_DUAL_DENY_REASON_COUNT; ++b) {
+            if (d.last_deny_mask & (1u << b)) {
+                printf("    - %s\n", fc_dual_motor_reason_name((FcDualDenyReason) (1u << b)));
+            }
+        }
+    }
+    printf("пары              целиком %llu, частичных %llu, запрещено %llu\n",
+           (unsigned long long) e.pairs_sent, (unsigned long long) e.pairs_partial,
+           (unsigned long long) e.pairs_denied);
+    printf("разбег пары       последний %" PRIu32 ", p50 %" PRIu32 ", p99 %" PRIu32
+           ", максимум %" PRIu32 " мкс (граница %u)\n",
+           e.skew_last_us, e.skew_p50_us, e.skew_p99_us, e.skew_max_us,
+           (unsigned) FC_DUAL_MAX_SKEW_US);
+    printf("кадры мотору      попыток %llu, ушло %llu, неудач %llu, отвергнуто сборкой %llu\n",
+           (unsigned long long) m.attempts, (unsigned long long) m.sent,
+           (unsigned long long) m.failed, (unsigned long long) m.build_rejected);
+    printf("последняя команда %llu мкс, последняя передача %llu мкс\n",
+           (unsigned long long) e.last_command_us, (unsigned long long) e.last_tx_us);
+    printf("впрыск отказов    0x%03" PRIx32 "%s\n", e.inject_mask,
+           e.inject_mask ? "  (ВКЛЮЧЁН)" : "");
+}
+
+static void cmd_motor_arm(void) {
+    uint32_t deny = 0;
+    if (fc_motor_experiment_arm(&deny)) {
+        printf("ВООРУЖЕНО. Колесо обязано быть вывешено.\n");
+        printf("Разоружить немедленно: motor-disarm\n");
+        return;
+    }
+    printf("вооружение ОТКЛОНЕНО, не выполнены условия:\n");
+    print_arm_deny(deny);
+}
+
+static void cmd_motor_disarm(void) {
+    fc_motor_experiment_disarm();
+    printf("обезоружено, источник остановлен\n");
+}
+
+static void cmd_motor_clear(void) {
+    fc_motor_experiment_clear_latch();
+    printf("защёлка снята. Вооружение НЕ восстановлено: motor-arm отдельно\n");
+}
+
+static void cmd_motor_run(const char *arg) {
+    if (!arg || !*arg) {
+        printf("motor-run <ампер> <мс>\n");
+        return;
+    }
+    char *end = NULL;
+    float a = strtof(arg, &end);
+    uint32_t ms = end ? (uint32_t) strtoul(end, NULL, 10) : 0;
+    if (ms == 0) {
+        ms = 1000;
+    }
+    if (!fc_motor_experiment_run(a, ms)) {
+        printf("ОТКЛОНЕНО: ток вне предела %.2f А, либо источник уже работает\n",
+               (double) FC_MOTOR_EXP_MAX_CURRENT_A);
+        return;
+    }
+    printf("источник запущен: %.3f А на %" PRIu32 " мс\n", (double) a, ms);
+}
+
+static void cmd_motor_stop(void) {
+    fc_motor_experiment_stop();
+    printf("остановка источника запрошена\n");
+}
+
+static void cmd_motor_inject(const char *arg) {
+    if (!arg || !*arg) {
+        printf("motor-inject <маска hex>  (0 — снять)\n");
+        printf("  0x001 IMU stale   0x002 узел A молчит   0x004 узел B молчит\n");
+        printf("  0x008 fault A     0x010 fault B         0x020 BUS_OFF\n");
+        printf("  0x040 CAN degraded 0x080 отказ TX A     0x100 отказ TX B\n");
+        printf("  0x200 остановка источника\n");
+        printf("текущая маска: 0x%03" PRIx32 "\n", fc_motor_experiment_injected());
+        return;
+    }
+    uint32_t m = (uint32_t) strtoul(arg, NULL, 0);
+    fc_motor_experiment_inject(m);
+    printf("маска впрыска: 0x%03" PRIx32 "\n", m);
+}
+
+static void cmd_motor_reset(void) {
+    fc_motor_experiment_reset_stats();
+    printf("статистика моторного стенда обнулена\n");
+}
+
+#endif // FC_MOTOR_BACKEND_AVAILABLE
 
 static void dispatch(const char *line) {
     if (!strcmp(line, "status")) {
@@ -1235,10 +1397,33 @@ static void dispatch(const char *line) {
                (line[10] == 0 || line[10] == ' ')) {
         cmd_imu_stress(line[10] == ' ' ? line + 11 : NULL);
 #endif
+    } else if (!strncmp(line, "gaps", 4) && (line[4] == 0 || line[4] == ' ')) {
+        cmd_gaps(line[4] == ' ' ? line + 5 : NULL);
+    } else if (!strcmp(line, "gaps-reset")) {
+        cmd_gaps_reset();
+#if FC_MOTOR_BACKEND_AVAILABLE
+    } else if (!strcmp(line, "motor-status")) {
+        cmd_motor_status();
+    } else if (!strcmp(line, "motor-arm")) {
+        cmd_motor_arm();
+    } else if (!strcmp(line, "motor-disarm")) {
+        cmd_motor_disarm();
+    } else if (!strcmp(line, "motor-clear-latch")) {
+        cmd_motor_clear();
+    } else if (!strcmp(line, "motor-stop")) {
+        cmd_motor_stop();
+    } else if (!strcmp(line, "motor-reset-stats")) {
+        cmd_motor_reset();
+    } else if (!strncmp(line, "motor-run", 9) && (line[9] == 0 || line[9] == ' ')) {
+        cmd_motor_run(line[9] == ' ' ? line + 10 : NULL);
+    } else if (!strncmp(line, "motor-inject", 12) && (line[12] == 0 || line[12] == ' ')) {
+        cmd_motor_inject(line[12] == ' ' ? line + 13 : NULL);
+#endif
     } else {
         cmd_help();
     }
 }
+
 
 static void console_task(void *arg) {
     (void) arg;

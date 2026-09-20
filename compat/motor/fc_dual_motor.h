@@ -127,6 +127,10 @@ typedef struct {
     float current_a[FC_DUAL_HALVES];    // что уйдёт каждой половине
     uint8_t order[FC_DUAL_HALVES];      // порядок передачи, всегда A затем B
     uint32_t deny_mask;                 // если send == false — почему
+    // Номер разрешённой пары. Монотонно растёт и НЕ увеличивается на отказах:
+    // разрыв в последовательности означает, что пара не ушла, а не что её
+    // потеряли по дороге. По нему же сопоставляются команда и телеметрия.
+    uint32_t sequence;
 } FcDualMotorPlan;
 
 typedef struct {
@@ -137,9 +141,52 @@ typedef struct {
     uint64_t partial_sends;
     uint64_t latched_faults;
     uint32_t last_deny_mask;
+    uint32_t sequence;
     bool latched;
     bool armed;
 } FcDualMotorStats;
+
+// ------------------------------------------------- вооружение оператором
+//
+// Способность на этапе компиляции и разрешение во время работы — разные вещи.
+// Экспериментальный профиль означает лишь, что транспорт существует. Команда
+// может уйти только после явного действия человека, и только когда выполнены
+// все условия ниже.
+//
+// Автоматического вооружения нет ни при каких обстоятельствах: восстановление
+// входов после отказа НЕ возвращает право на тягу.
+typedef enum {
+    FC_DUAL_ARM_DENY_SUPERVISOR = 1u << 0,  // supervisor нездоров или в FAULT
+    FC_DUAL_ARM_DENY_IMU = 1u << 1,
+    FC_DUAL_ARM_DENY_NODE_A = 1u << 2,
+    FC_DUAL_ARM_DENY_NODE_B = 1u << 3,
+    FC_DUAL_ARM_DENY_LATCHED = 1u << 4,
+    FC_DUAL_ARM_DENY_CAN = 1u << 5,
+    FC_DUAL_ARM_DENY_BATTERY_MODEL = 1u << 6,
+    FC_DUAL_ARM_DENY_MOTOR_MODEL = 1u << 7,
+    FC_DUAL_ARM_DENY_BOOT = 1u << 8,
+    FC_DUAL_ARM_DENY_REALTIME = 1u << 9,
+    FC_DUAL_ARM_DENY_COUNT = 10
+} FcDualArmDeny;
+
+typedef struct {
+    bool supervisor_healthy;
+    bool imu_healthy;
+    bool node_healthy[FC_DUAL_HALVES];
+    bool can_healthy;
+    bool battery_model_valid;
+    bool motor_model_valid;
+    bool boot_complete;
+    bool realtime_qualified;
+} FcDualArmInputs;
+
+/**
+ * Попытаться вооружить. Возвращает true только если выполнены ВСЕ условия;
+ * иначе в deny_mask лежат все невыполненные, а состояние не меняется.
+ */
+bool fc_dual_motor_try_arm(const FcDualArmInputs *in, uint32_t *deny_mask);
+
+const char *fc_dual_motor_arm_deny_name(FcDualArmDeny r);
 
 void fc_dual_motor_init(const FcDualMotorConfig *cfg);
 
@@ -147,8 +194,8 @@ void fc_dual_motor_init(const FcDualMotorConfig *cfg);
 FcDualMotorConfig fc_dual_motor_default_config(void);
 
 /**
- * Запросить разрешение. Само по себе НЕ разрешает: снимает запрет «не
- * запрашивалось», не снимая ни одного другого.
+ * Безусловное вооружение. Существует ТОЛЬКО для host-тестов, где условия
+ * подаются сценарием, а не системой. На плате используется try_arm.
  */
 void fc_dual_motor_arm(void);
 

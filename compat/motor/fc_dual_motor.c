@@ -37,6 +37,52 @@ void fc_dual_motor_arm(void) {
     ST.armed = true;
 }
 
+bool fc_dual_motor_try_arm(const FcDualArmInputs *in, uint32_t *deny_mask) {
+    uint32_t m = 0;
+    if (in == NULL) {
+        m = 0xFFFFFFFFu;
+    } else {
+        if (!in->supervisor_healthy) m |= FC_DUAL_ARM_DENY_SUPERVISOR;
+        if (!in->imu_healthy) m |= FC_DUAL_ARM_DENY_IMU;
+        if (!in->node_healthy[FC_DUAL_A]) m |= FC_DUAL_ARM_DENY_NODE_A;
+        if (!in->node_healthy[FC_DUAL_B]) m |= FC_DUAL_ARM_DENY_NODE_B;
+        if (!in->can_healthy) m |= FC_DUAL_ARM_DENY_CAN;
+        if (!in->battery_model_valid) m |= FC_DUAL_ARM_DENY_BATTERY_MODEL;
+        if (!in->motor_model_valid) m |= FC_DUAL_ARM_DENY_MOTOR_MODEL;
+        if (!in->boot_complete) m |= FC_DUAL_ARM_DENY_BOOT;
+        if (!in->realtime_qualified) m |= FC_DUAL_ARM_DENY_REALTIME;
+    }
+    // Защёлка проверяется отдельно от входов: она живёт в самом координаторе
+    // и снимается только предусмотренной процедурой.
+    if (ST.latched || !PREV_PAIR_WHOLE) {
+        m |= FC_DUAL_ARM_DENY_LATCHED;
+    }
+    if (deny_mask) {
+        *deny_mask = m;
+    }
+    if (m != 0) {
+        return false;
+    }
+    ST.armed = true;
+    return true;
+}
+
+const char *fc_dual_motor_arm_deny_name(FcDualArmDeny r) {
+    switch (r) {
+    case FC_DUAL_ARM_DENY_SUPERVISOR: return "supervisor нездоров";
+    case FC_DUAL_ARM_DENY_IMU: return "IMU нездоров";
+    case FC_DUAL_ARM_DENY_NODE_A: return "половина A нездорова";
+    case FC_DUAL_ARM_DENY_NODE_B: return "половина B нездорова";
+    case FC_DUAL_ARM_DENY_LATCHED: return "залипший отказ не снят";
+    case FC_DUAL_ARM_DENY_CAN: return "шина CAN нездорова";
+    case FC_DUAL_ARM_DENY_BATTERY_MODEL: return "модель батареи не проверена";
+    case FC_DUAL_ARM_DENY_MOTOR_MODEL: return "параметры мотора не подтверждены";
+    case FC_DUAL_ARM_DENY_BOOT: return "загрузка не завершена";
+    case FC_DUAL_ARM_DENY_REALTIME: return "realtime-квалификация не пройдена";
+    default: return "?";
+    }
+}
+
 void fc_dual_motor_disarm(void) {
     ST.armed = false;
 }
@@ -136,6 +182,7 @@ FcDualMotorPlan fc_dual_motor_plan(const FcDualMotorInputs *in) {
 
     ++ST.permits_granted;
     p.send = true;
+    p.sequence = ++ST.sequence;
     for (unsigned i = 0; i < FC_DUAL_HALVES; ++i) {
         p.current_a[i] = CFG.invert[i] ? -v : v;
     }

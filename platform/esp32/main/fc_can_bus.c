@@ -66,6 +66,9 @@ static struct {
     SemaphoreHandle_t done;
     volatile bool awaiting;
 #endif
+#if FC_CAN_TX_AVAILABLE
+    FcCanMotorStats mst;
+#endif
 } C;
 
 const char *fc_can_bus_mode_name(void) {
@@ -334,12 +337,16 @@ uint32_t fc_can_bus_stack_watermark(void) {
 
 #if FC_CAN_DIAG_TX_AVAILABLE
 
-// ЕДИНСТВЕННАЯ функция в прошивке, вызывающая twai_transmit().
+// Единственная функция, передающая ДИАГНОСТИЧЕСКИЙ кадр.
 //
 // static — то есть её нет в таблице символов как внешней, и ни один другой
 // модуль не может её вызвать даже по ошибке. Аргумент — уже собранный
 // белым списком кадр, а не пара (идентификатор, байты): подставить сюда
 // произвольный пакет неоткуда, потому что построить его нечем.
+//
+// В профиле с транспортом мотору рядом появляется вторая такая функция —
+// transmit_motor() ниже. Их ровно две, обе static, и никакой третьей в
+// прошивке нет: это проверяется аудитом символов (ТЗ v0.9A §5, §22).
 static bool transmit_whitelisted(const FcCanDiagFrame *f, uint32_t timeout_ms) {
     twai_message_t m;
     memset(&m, 0, sizeof(m));
@@ -425,3 +432,63 @@ void fc_can_bus_diag_reset_stats(void) {
 #endif  // FC_CAN_DIAG_TX_AVAILABLE
 
 #endif  // FC_CAN_RX_AVAILABLE
+
+
+#if FC_CAN_TX_AVAILABLE
+
+// ------------------------------------------- транспорт команд мотору (v0.9A)
+//
+// ВТОРАЯ И ПОСЛЕДНЯЯ функция в прошивке, вызывающая twai_transmit().
+//
+// Она не принимает решений о безопасности и не умеет собрать кадр сама:
+// сериализация живёт в compat/can/fc_vesc_can_motor.c, право на команду —
+// в Motor Gate и координаторе. Здесь только передача уже готового кадра.
+//
+// Почему отдельная функция, а не расширение transmit_whitelisted. Потому что
+// тогда исчезла бы граница, по которой сегодня видно, что именно способна
+// послать сборка: одна функция с флагом «это моторный кадр» означает, что
+// любая ошибка в вызывающем коде превращается в моторную команду.
+static bool transmit_motor(const FcMotorFrame *f, uint32_t timeout_ms) {
+    twai_message_t m;
+    memset(&m, 0, sizeof(m));
+    m.identifier = f->eid;
+    m.extd = 1;
+    m.data_length_code = f->len;
+    memcpy(m.data, f->data, f->len);
+    return twai_transmit(&m, pdMS_TO_TICKS(timeout_ms)) == ESP_OK;
+}
+
+bool fc_can_bus_motor_send_current(uint8_t target_id, float amps) {
+    if (!C.installed || !C.run) {
+        return false;
+    }
+    FcMotorFrame f;
+    if (fc_vesc_can_motor_build_current(target_id, amps, &f) != FC_MOTOR_FRAME_OK) {
+        // Сюда негодное значение доходить не должно: его обязаны были
+        // отвергнуть выше. Если дошло — это ошибка архитектуры, и она
+        // считается отказом передачи, а не тихо округляется.
+        ++C.mst.build_rejected;
+        return false;
+    }
+    ++C.mst.attempts;
+    // Таймаут передачи короткий намеренно. Команда идёт каждые 2 мс, и
+    // застрявшая в очереди на десятки миллисекунд уже неактуальна: лучше
+    // считать её неудачной и дать сработать отказному пути, чем доставить
+    // устаревшую тягу.
+    if (transmit_motor(&f, 2)) {
+        ++C.mst.sent;
+        return true;
+    }
+    ++C.mst.failed;
+    return false;
+}
+
+FcCanMotorStats fc_can_bus_motor_stats(void) {
+    return C.mst;
+}
+
+void fc_can_bus_motor_reset_stats(void) {
+    memset(&C.mst, 0, sizeof C.mst);
+}
+
+#endif  // FC_CAN_TX_AVAILABLE

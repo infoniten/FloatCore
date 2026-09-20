@@ -20,6 +20,8 @@ idf_component_register(
         "fc_sched.c"
         "fc_supervisor_task.c"
         "fc_safety_report.c"
+        "fc_gap_port.c"
+        "fc_motor_experiment.c"
         "../drivers/icm20948.c"
         "../../../compat/safety/fc_supervisor.c"
         "../../../compat/safety/fc_motor_gate.c"
@@ -37,6 +39,9 @@ idf_component_register(
         "../../../compat/can/fc_vesc_can.c"
         "../../../compat/can/fc_can_diag.c"
         "../../../compat/can/fc_can_health.c"
+        "../../../compat/can/fc_vesc_can_motor.c"
+        "../../../compat/motor/fc_dual_motor.c"
+        "../../../compat/diag/fc_gap_trace.c"
         "../../../compat/vesc_protocol/packet.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS
@@ -47,8 +52,33 @@ idf_component_register(
 )
 
 # Профиль сборки — свойство двоичного файла, а не настройка во время работы.
-# На этапах v0.5–v0.6x собирается только лабораторный профиль.
-target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_LAB_SAFE=1)
+#
+#   lab_safe      моторного вывода нет как кода. Умолчание.
+#   experimental  v0.9A: транспорт команд мотору существует. Собирать
+#                 ТОЛЬКО для стенда с вывешенным колесом.
+#
+# Задаётся при сборке: `idf.py -DFLOATCORE_PROFILE=experimental build`.
+#
+# Умолчание намеренно лабораторное: сборка, способная крутить мотор, не должна
+# получаться случайно — ни забытым флагом, ни чужим кэшем CMake.
+if(NOT DEFINED FLOATCORE_PROFILE)
+    set(FLOATCORE_PROFILE "lab_safe")
+endif()
+
+if(FLOATCORE_PROFILE STREQUAL "lab_safe")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_LAB_SAFE=1)
+elseif(FLOATCORE_PROFILE STREQUAL "experimental")
+    # Второе определение — не удвоение, а подтверждение. Профиль не соберётся
+    # без него (fc_build_profile.h), поэтому «случайно собрать моторную
+    # прошивку» требует написать вслух, что колесо вывешено.
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC
+        FLOATCORE_MOTOR_EXPERIMENTAL=1
+        FLOATCORE_MOTOR_EXPERIMENTAL_WHEEL_OFF_GROUND=1)
+else()
+    message(FATAL_ERROR "FLOATCORE_PROFILE: ожидается lab_safe или experimental, получено "
+                        "'${FLOATCORE_PROFILE}'")
+endif()
+message(STATUS "FloatCore: профиль сборки = ${FLOATCORE_PROFILE}")
 
 # Профиль шины CAN — тоже свойство двоичного файла.
 #
@@ -60,15 +90,21 @@ target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_LAB_SAFE=1)
 # Умолчание — active_diag, текущий этап. Ни один из них не совместим с
 # транспортом команд мотору: это проверяет fc_build_profile.h.
 if(NOT DEFINED FLOATCORE_CAN_PROFILE)
-    set(FLOATCORE_CAN_PROFILE "active_diag")
+    if(FLOATCORE_PROFILE STREQUAL "experimental")
+        set(FLOATCORE_CAN_PROFILE "active_motor")
+    else()
+        set(FLOATCORE_CAN_PROFILE "active_diag")
+    endif()
 endif()
 
 if(FLOATCORE_CAN_PROFILE STREQUAL "passive")
     target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_CAN_PASSIVE=1)
 elseif(FLOATCORE_CAN_PROFILE STREQUAL "active_diag")
     target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_CAN_ACTIVE_DIAG=1)
+elseif(FLOATCORE_CAN_PROFILE STREQUAL "active_motor")
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_CAN_ACTIVE_MOTOR=1)
 else()
-    message(FATAL_ERROR "FLOATCORE_CAN_PROFILE: ожидается passive или active_diag, получено "
-                        "'${FLOATCORE_CAN_PROFILE}'")
+    message(FATAL_ERROR "FLOATCORE_CAN_PROFILE: ожидается passive, active_diag или active_motor, "
+                        "получено '${FLOATCORE_CAN_PROFILE}'")
 endif()
 message(STATUS "FloatCore: профиль CAN = ${FLOATCORE_CAN_PROFILE}")

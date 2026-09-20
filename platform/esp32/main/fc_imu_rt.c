@@ -23,6 +23,7 @@
 // компенсации монтажного наклона. Оси датчика уходят в Refloat как есть —
 // обоснование тождественности преобразования в docs/imu_orientation_mapping.md.
 
+#include "fc_gap_port.h"
 #include "fc_log_port.h"
 #include "fc_platform.h"
 
@@ -105,6 +106,7 @@ static struct {
     uint32_t consecutive_failures;
     uint64_t reinits;
     uint64_t last_reinit_us;
+    uint64_t last_accepted_us;
     uint32_t max_read_us;
     uint64_t iterations;
 
@@ -246,6 +248,23 @@ static void imu_rt_task(void *arg) {
 
         // --- принятый физический семпл: ровно одна итерация контура --------
         FcImuSample sample = fc_imu_pipeline_sample();
+
+        // Трассировка длинных зазоров (ТЗ v0.9A §3). Считается ЗДЕСЬ, между
+        // принятыми семплами, потому что именно этот интервал видит Refloat:
+        // отвергнутый или сдублированный семпл до него не доходит.
+        //
+        // Дешёвая проверка порога — в горячем пути; сбор снимка происходит
+        // только когда порог превышен, то есть в среднем никогда.
+        if (R.last_accepted_us != 0) {
+            uint64_t d = sample.timestamp_us > R.last_accepted_us
+                             ? sample.timestamp_us - R.last_accepted_us
+                             : 0;
+            if (d > 0xFFFFFFFFull) {
+                d = 0xFFFFFFFFull;
+            }
+            fc_gap_port_capture(sample.timestamp_us, R.last_accepted_us, (uint32_t) d);
+        }
+        R.last_accepted_us = sample.timestamp_us;
 
         fc_timing_tick(FC_TIMING_CONTROL);
         fc_supervisor_report_loop_tick(sample.timestamp_us);

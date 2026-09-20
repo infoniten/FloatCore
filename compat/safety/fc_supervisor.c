@@ -22,6 +22,8 @@ static struct {
     uint64_t last_imu_sample_us;
     uint32_t transitions;
     uint32_t fault_entries;
+    uint32_t imu_stale_age_us;
+    uint32_t imu_worst_age_us;
     FcSupervisorInputs in;
     bool loop_tick_seen;
     bool imu_sample_seen;
@@ -174,7 +176,17 @@ void fc_supervisor_poll(uint64_t now_us) {
     }
 
     // Протухание IMU. То же правило: считаем только после первого семпла.
+    if (S.imu_sample_seen) {
+        uint64_t age = now_us > S.last_imu_sample_us ? now_us - S.last_imu_sample_us : 0;
+        if (age > 0xFFFFFFFFull) {
+            age = 0xFFFFFFFFull;
+        }
+        if ((uint32_t) age > S.imu_worst_age_us) {
+            S.imu_worst_age_us = (uint32_t) age;
+        }
+    }
     if (S.imu_sample_seen && now_us - S.last_imu_sample_us > FC_SUP_IMU_TIMEOUT_US) {
+        S.imu_stale_age_us = (uint32_t) (now_us - S.last_imu_sample_us);
         S.in.imu_healthy = false;
         if (S.state == FC_SUP_DISARMED || S.state == FC_SUP_READY || S.state == FC_SUP_ARMED ||
             S.state == FC_SUP_RUNNING) {
@@ -231,6 +243,8 @@ FcSupervisorStatus fc_supervisor_status(void) {
     st.last_imu_sample_us = S.last_imu_sample_us;
     st.transitions = S.transitions;
     st.fault_entries = S.fault_entries;
+    st.imu_stale_age_us = S.imu_stale_age_us;
+    st.imu_worst_age_us = S.imu_worst_age_us;
     st.inputs = S.in;
     return st;
 }

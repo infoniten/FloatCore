@@ -41,12 +41,24 @@ typedef enum {
     FC_MOTOR_REQ_KIND_COUNT
 } FcMotorRequestKind;
 
+// Кто просит. Различать источники приходится потому, что на v0.9A выход
+// Refloat НЕ подключается к реальному транспорту (ТЗ §24): балансировочный
+// контроллер с живым IMU, получив право слать, немедленно начал бы
+// балансировать, а это ровно то, что запрещено. Экспериментальный источник —
+// отдельный и явный.
+typedef enum {
+    FC_MOTOR_ORIGIN_REFLOAT = 0, // контур балансировки через VESC_IF
+    FC_MOTOR_ORIGIN_EXPERIMENT,  // явная команда оператора на вывешенном колесе
+    FC_MOTOR_ORIGIN_COUNT
+} FcMotorOrigin;
+
 typedef enum {
     FC_GATE_ALLOWED = 0,       // политика разрешила (в LAB_SAFE недостижимо)
     FC_GATE_REJECTED_DISARMED, // supervisor не в состоянии, разрешающем тягу
     FC_GATE_REJECTED_FAULT,    // supervisor в FAULT
     FC_GATE_REJECTED_INVALID,  // NaN/Inf или значение вне допустимого диапазона
-    FC_GATE_REJECTED_NO_BACKEND  // backend отсутствует (LAB_SAFE)
+    FC_GATE_REJECTED_NO_BACKEND, // backend отсутствует (LAB_SAFE)
+    FC_GATE_REJECTED_ORIGIN      // источник не допущен в этом профиле
 } FcGateVerdict;
 
 typedef struct {
@@ -56,6 +68,8 @@ typedef struct {
     uint64_t rejected_fault;
     uint64_t rejected_invalid;
     uint64_t rejected_no_backend;
+    uint64_t rejected_origin;
+    uint64_t by_origin[FC_MOTOR_ORIGIN_COUNT];
     uint64_t delivered_to_backend;
     // Инкрементируется ИСКЛЮЧИТЕЛЬНО backend-ом, который физически передал
     // команду наружу. В LAB_SAFE такого backend-а не существует, поэтому
@@ -76,6 +90,14 @@ typedef struct {
     bool (*send)(FcMotorRequestKind kind, float value, void *ctx);
     void *ctx;
 } FcMotorBackend;
+
+/**
+ * Какие источники допущены до backend-а.
+ *
+ * На v0.9A допущен ТОЛЬКО экспериментальный: подключение выхода Refloat к
+ * реальному транспорту — отдельное решение отдельного этапа.
+ */
+#define FC_GATE_ALLOWED_ORIGINS_V09A (1u << FC_MOTOR_ORIGIN_EXPERIMENT)
 
 void fc_motor_gate_init(void);
 
@@ -99,6 +121,18 @@ const char *fc_motor_gate_backend_name(void);
  * now_us — монотонное время платформы.
  */
 FcGateVerdict fc_motor_gate_request(FcMotorRequestKind kind, float value, uint64_t now_us);
+
+/**
+ * То же, но с явным источником. Старая форма остаётся синонимом источника
+ * REFLOAT: все вызовы из VESC_IF приходят оттуда, и менять их не нужно.
+ */
+FcGateVerdict fc_motor_gate_request_from(FcMotorOrigin origin, FcMotorRequestKind kind, float value,
+                                         uint64_t now_us);
+
+/** Битовая маска допущенных источников. По умолчанию — только эксперимент. */
+void fc_motor_gate_set_allowed_origins(uint32_t mask);
+uint32_t fc_motor_gate_allowed_origins(void);
+const char *fc_motor_gate_origin_name(FcMotorOrigin o);
 
 /** Аналог VESC_IF->timeout_reset: продление watchdog, тяги не запрашивает. */
 void fc_motor_gate_keepalive(void);

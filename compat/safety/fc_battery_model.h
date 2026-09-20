@@ -65,6 +65,17 @@ typedef struct {
  */
 bool fc_battery_model_valid(const FcBatteryModel *m, const char **why);
 
+/**
+ * Модель, ФАКТИЧЕСКИ применённая к машине (v0.7D.1).
+ *
+ * Числа не выдуманы здесь: каждое записано отдельной операцией и проверено
+ * побайтовым сличением с резервной копией, а затем пережило полный цикл
+ * питания (docs/esc_config_checkpoint.md §3, §6). Держать их в одном месте
+ * нужно затем, чтобы расхождение между тем, что в ESC, и тем, из чего
+ * исходит прошивка, было видно как расхождение, а не как «так исторически».
+ */
+FcBatteryModel fc_battery_model_applied(void);
+
 /** Оценка числа ячеек по regen-отсечке: она ставится на полный заряд. */
 int fc_battery_cells_from_regen_cutoff(const FcBatteryModel *m);
 

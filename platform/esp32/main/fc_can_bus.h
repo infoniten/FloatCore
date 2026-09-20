@@ -42,6 +42,7 @@
 #include "../../../compat/safety/fc_build_profile.h"
 #include "../../../compat/can/fc_can_diag.h"
 #include "../../../compat/can/fc_can_health.h"
+#include "../../../compat/can/fc_vesc_can_motor.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -177,5 +178,34 @@ FcCanDiagStats fc_can_bus_diag_stats(void);
 void fc_can_bus_diag_reset_stats(void);
 
 #endif  // FC_CAN_DIAG_TX_AVAILABLE
+
+#if FC_CAN_TX_AVAILABLE
+
+// ------------------------------------------- транспорт команд мотору (v0.9A)
+//
+// Существует только в профиле MOTOR_EXPERIMENTAL. В лабораторной сборке этих
+// объявлений нет, а соответствующий код не компилируется — проверяется
+// отрицательным тестом компиляции и аудитом символов.
+
+typedef struct {
+    uint64_t attempts;
+    uint64_t sent;
+    uint64_t failed;
+    uint64_t build_rejected;
+} FcCanMotorStats;
+
+/**
+ * Передать CAN_PACKET_SET_CURRENT одной половине.
+ *
+ * НЕ принимает решений о безопасности: вызывающий обязан быть координатором,
+ * который уже проверил право на команду. Возвращает true, только если кадр
+ * действительно ушёл.
+ */
+bool fc_can_bus_motor_send_current(uint8_t target_id, float amps);
+
+FcCanMotorStats fc_can_bus_motor_stats(void);
+void fc_can_bus_motor_reset_stats(void);
+
+#endif  // FC_CAN_TX_AVAILABLE
 
 #endif  // FC_CAN_RX_AVAILABLE

@@ -5,10 +5,19 @@
 // «выключены флагом»: выключенный флаг можно переключить, отсутствующий код
 // переключить нельзя.
 //
-//   FLOATCORE_LAB_SAFE       лабораторная сборка. Единственная, которую
-//                            разрешено прошивать на этапах v0.5–v0.6x.
-//   FLOATCORE_MOTOR_CAPABLE  задел под будущее. Существует как структура,
-//                            собираться на живой плате не должен.
+//   FLOATCORE_LAB_SAFE             лабораторная сборка. Моторного вывода нет
+//                                  как кода.
+//   FLOATCORE_MOTOR_EXPERIMENTAL   v0.9A: транспорт моторных команд
+//                                  существует, но включается только явным
+//                                  действием оператора и только на
+//                                  вывешенном колесе.
+//   FLOATCORE_MOTOR_CAPABLE        задел под рабочую сборку. По-прежнему
+//                                  собираться не должен.
+//
+// СПОСОБНОСТЬ НА ЭТАПЕ КОМПИЛЯЦИИ И РАЗРЕШЕНИЕ ВО ВРЕМЯ РАБОТЫ — РАЗНЫЕ
+// ВЕЩИ. Экспериментальный профиль означает лишь, что транспорт существует.
+// Он не означает, что команда может уйти: после загрузки и после любого
+// отказа система обезоружена, и вооружить её может только оператор.
 //
 // Что LAB_SAFE гарантирует на этапе компиляции:
 //   * fc_motor_gate_set_backend() не объявлена и не определена — зарегистрировать
@@ -22,12 +31,14 @@
 // safety-bypass. Их отсутствие — часть прогона, а не обещание.
 #pragma once
 
-#if defined(FLOATCORE_LAB_SAFE) && defined(FLOATCORE_MOTOR_CAPABLE)
-#error "FLOATCORE_LAB_SAFE и FLOATCORE_MOTOR_CAPABLE взаимоисключающи"
+#if (defined(FLOATCORE_LAB_SAFE) + defined(FLOATCORE_MOTOR_EXPERIMENTAL) +                          \
+     defined(FLOATCORE_MOTOR_CAPABLE)) > 1
+#error "Профили сборки взаимоисключающи: задайте ровно один"
 #endif
 
-#if !defined(FLOATCORE_LAB_SAFE) && !defined(FLOATCORE_MOTOR_CAPABLE)
-#error "Профиль сборки не задан: определите FLOATCORE_LAB_SAFE или FLOATCORE_MOTOR_CAPABLE"
+#if !defined(FLOATCORE_LAB_SAFE) && !defined(FLOATCORE_MOTOR_EXPERIMENTAL) &&                       \
+    !defined(FLOATCORE_MOTOR_CAPABLE)
+#error "Профиль сборки не задан: LAB_SAFE, MOTOR_EXPERIMENTAL или MOTOR_CAPABLE"
 #endif
 
 #ifdef FLOATCORE_LAB_SAFE
@@ -42,6 +53,27 @@
 // Команды, которые меняют состояние, но физически безопасны: они нужны
 // для проверки самих механизмов безопасности (watchdog, panic, persistence).
 #define FC_LAB_DIAGNOSTICS 1
+
+#elif defined(FLOATCORE_MOTOR_EXPERIMENTAL)
+
+#define FC_PROFILE_NAME "MOTOR_EXPERIMENTAL"
+// Транспорт моторных команд существует. Это единственное отличие от
+// лабораторной сборки на уровне кода; всё остальное решается во время работы.
+#define FC_MOTOR_BACKEND_AVAILABLE 1
+#define FC_CAN_TX_AVAILABLE 1
+// Опасная диагностика по-прежнему отсутствует: экспериментальный профиль не
+// является поводом открыть всё сразу.
+#define FC_DANGEROUS_DIAGNOSTICS 0
+// Лабораторная диагностика нужна: именно ею проверяются отказные пути
+// (впрыск устаревшего IMU, молчания узла, частичной передачи).
+#define FC_LAB_DIAGNOSTICS 1
+
+// Профиль предназначен ТОЛЬКО для вывешенного колеса. Человек на доске,
+// замкнутая балансировка и подключение выхода Refloat к реальному транспорту
+// на этом этапе запрещены (ТЗ v0.9A §0, §24).
+#ifndef FLOATCORE_MOTOR_EXPERIMENTAL_WHEEL_OFF_GROUND
+#error "MOTOR_EXPERIMENTAL собирается только с подтверждением вывешенного колеса"
+#endif
 
 #else  // FLOATCORE_MOTOR_CAPABLE
 
@@ -102,10 +134,25 @@
 #error "FLOATCORE_CAN_ACTIVE_DIAG несовместим с backend-ом выхода на мотор"
 #endif
 
+// Транспорт команд мотору требует СВОЕГО профиля шины. Разрешать его в
+// диагностическом было бы удобнее на один флаг, но тогда исчезла бы граница,
+// по которой сегодня видно, способна ли сборка вообще что-то послать мотору.
+#if defined(FLOATCORE_CAN_ACTIVE_MOTOR) && !FC_CAN_TX_AVAILABLE
+#error "FLOATCORE_CAN_ACTIVE_MOTOR требует профиля сборки с транспортом мотору"
+#endif
+
+#if FC_CAN_TX_AVAILABLE && !defined(FLOATCORE_CAN_ACTIVE_MOTOR)
+#error "Транспорт мотору требует FLOATCORE_CAN_ACTIVE_MOTOR"
+#endif
+
 #ifdef FLOATCORE_CAN_PASSIVE
 #define FC_CAN_PROFILE_NAME "PASSIVE (listen-only)"
 #define FC_CAN_RX_AVAILABLE 1
 #define FC_CAN_DIAG_TX_AVAILABLE 0
+#elif defined(FLOATCORE_CAN_ACTIVE_MOTOR)
+#define FC_CAN_PROFILE_NAME "ACTIVE_MOTOR (normal mode, read-only requests + torque)"
+#define FC_CAN_RX_AVAILABLE 1
+#define FC_CAN_DIAG_TX_AVAILABLE 1
 #elif defined(FLOATCORE_CAN_ACTIVE_DIAG)
 #define FC_CAN_PROFILE_NAME "ACTIVE_DIAG (normal mode, read-only requests)"
 #define FC_CAN_RX_AVAILABLE 1

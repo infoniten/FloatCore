@@ -15,7 +15,10 @@
 #include "fc_imu_source.h"
 #include "fc_can_bus.h"
 #include "../../../compat/config/floatcore_limits.h"
+#include "fc_gap_port.h"
 #include "fc_log_port.h"
+#include "fc_motor_experiment.h"
+#include "../../../compat/diag/fc_gap_trace.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
 #include "../../../compat/safety/fc_build_profile.h"
 #include "../../../compat/safety/fc_imu_health.h"
@@ -255,6 +258,10 @@ void app_main(void) {
     //    самого начала, а не с момента, когда всё уже работает.
     fc_supervisor_init(t);
     fc_motor_gate_init();
+    // Трассировка зазоров поднимается ДО задачи чтения IMU: первый же
+    // длинный зазор должен быть пойман, а не пропущен из-за порядка запуска
+    // (ТЗ v0.9A §3 — трассировка обязана существовать до моторных команд).
+    fc_gap_trace_init(FC_GAP_TRACE_DEFAULT_THRESHOLD_US);
 
     // 0. Журнал — раньше всего остального. С этого момента realtime-пути
     //    (контур IMU, refloat_thd, драйвер датчика, VESC_IF->printf) кладут
@@ -370,6 +377,13 @@ void app_main(void) {
            (double) refloat_facade_config_test_value());
 
     xTaskCreatePinnedToCore(report_task, "fc_report", 4096, NULL, 3, NULL, FC_CORE_HOUSEKEEPING);
+#if FC_MOTOR_BACKEND_AVAILABLE
+    // Транспорт мотору регистрируется ПОСЛЕ шины и ПОСЛЕ супервизора, и
+    // только регистрируется: система остаётся обезоруженной, команда не
+    // может уйти до явного действия оператора.
+    fc_motor_experiment_init();
+#endif
+
     fc_console_start();
     printf("\nfloatcore> ");
 

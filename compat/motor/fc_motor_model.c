@@ -218,6 +218,24 @@ const FcMotorParam *fc_motor_model_find(const char *name) {
     return NULL;
 }
 
+bool fc_motor_model_ready_for_torque_test(const char **why) {
+    static const char *const NEEDED[] = {"si_motor_poles", "foc_motor_flux_linkage",
+                                         "si_battery_cells"};
+    for (size_t i = 0; i < sizeof NEEDED / sizeof NEEDED[0]; ++i) {
+        const FcMotorParam *p = fc_motor_model_find(NEEDED[i]);
+        if (p == NULL || p->trust_a != FC_PARAM_VERIFIED || p->trust_b != FC_PARAM_VERIFIED) {
+            if (why) {
+                *why = NEEDED[i];
+            }
+            return false;
+        }
+    }
+    if (why) {
+        *why = NULL;
+    }
+    return true;
+}
+
 bool fc_motor_model_ready_for_output(const char **why) {
     const char *dummy = NULL;
     if (!why) {

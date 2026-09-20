@@ -14,6 +14,7 @@ static struct {
     FcMotorGateStats stats;
     const FcMotorBackend *backend;
     float value_limit;
+    uint32_t allowed_origins;
 } G;
 
 // Значение по умолчанию — политика FloatCore, а не число из datasheet.
@@ -25,6 +26,23 @@ static struct {
 void fc_motor_gate_init(void) {
     memset(&G, 0, sizeof(G));
     G.value_limit = FC_GATE_DEFAULT_VALUE_LIMIT;
+    G.allowed_origins = FC_GATE_ALLOWED_ORIGINS_V09A;
+}
+
+void fc_motor_gate_set_allowed_origins(uint32_t mask) {
+    G.allowed_origins = mask;
+}
+
+uint32_t fc_motor_gate_allowed_origins(void) {
+    return G.allowed_origins;
+}
+
+const char *fc_motor_gate_origin_name(FcMotorOrigin o) {
+    switch (o) {
+    case FC_MOTOR_ORIGIN_REFLOAT: return "refloat";
+    case FC_MOTOR_ORIGIN_EXPERIMENT: return "experiment";
+    default: return "?";
+    }
 }
 
 void fc_motor_gate_set_value_limit(float limit) {
@@ -44,6 +62,16 @@ const char *fc_motor_gate_backend_name(void) {
 }
 
 FcGateVerdict fc_motor_gate_request(FcMotorRequestKind kind, float value, uint64_t now_us) {
+    return fc_motor_gate_request_from(FC_MOTOR_ORIGIN_REFLOAT, kind, value, now_us);
+}
+
+FcGateVerdict fc_motor_gate_request_from(FcMotorOrigin origin, FcMotorRequestKind kind, float value,
+                                         uint64_t now_us) {
+    if ((unsigned) origin >= FC_MOTOR_ORIGIN_COUNT) {
+        ++G.stats.requests_total;
+        ++G.stats.rejected_origin;
+        return FC_GATE_REJECTED_ORIGIN;
+    }
     if ((unsigned) kind >= FC_MOTOR_REQ_KIND_COUNT) {
         ++G.stats.requests_total;
         ++G.stats.rejected_invalid;
@@ -51,6 +79,7 @@ FcGateVerdict fc_motor_gate_request(FcMotorRequestKind kind, float value, uint64
     }
 
     ++G.stats.requests_total;
+    ++G.stats.by_origin[origin];
     ++G.stats.by_kind[kind];
     G.stats.last_value[kind] = value;
     G.stats.last_request_us = now_us;
@@ -70,9 +99,24 @@ FcGateVerdict fc_motor_gate_request(FcMotorRequestKind kind, float value, uint64
     }
 
     // 3. Разрешает ли состояние вообще выход на мотор.
-    if (!fc_supervisor_motor_output_permitted()) {
+    //
+    //    Экспериментальный источник ЭТУ проверку не проходит и не должен:
+    //    состояние ARMED у супервизора означает человека на доске, а здесь
+    //    колесо вывешено. Право эксперимента решается ниже — вооружением
+    //    оператора и четырнадцатью условиями координатора, а не подделкой
+    //    состояния супервизора под то, чем оно не является.
+    if (origin != FC_MOTOR_ORIGIN_EXPERIMENT && !fc_supervisor_motor_output_permitted()) {
         ++G.stats.rejected_disarmed;
         return FC_GATE_REJECTED_DISARMED;
+    }
+
+    // 3a. Источник. Стоит ПОСЛЕ санитарной проверки и после состояния
+    //     намеренно: разрушенное значение важно назвать разрушенным, кто бы
+    //     его ни прислал. Но до backend-а недопущенный источник не доходит —
+    //     а только это и требуется.
+    if ((G.allowed_origins & (1u << origin)) == 0) {
+        ++G.stats.rejected_origin;
+        return FC_GATE_REJECTED_ORIGIN;
     }
 
     ++G.stats.allowed_by_policy;
@@ -141,6 +185,8 @@ const char *fc_motor_gate_verdict_name(FcGateVerdict v) {
         return "rejected_invalid";
     case FC_GATE_REJECTED_NO_BACKEND:
         return "rejected_no_backend";
+    case FC_GATE_REJECTED_ORIGIN:
+        return "rejected_origin";
     default:
         return "?";
     }

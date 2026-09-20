@@ -62,7 +62,7 @@ HOST_TESTS_BIN := $(BIN)/refloat_host_tests
 PROTO_TESTS_BIN := $(BIN)/protocol_tests
 HOST_BIN := $(BIN)/floatcore_host
 
-.PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32 safety-tests can-negative-test
+.PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32 safety-tests can-negative-test motor-tests
 
 all: $(HOST_TESTS_BIN) $(PROTO_TESTS_BIN) $(HOST_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN) \
      $(DIAG_TESTS_BIN)
@@ -180,7 +180,7 @@ $(HOST_BIN): $(FH_OBJ)
 
 # --------------------------------------------------------------------- запуск
 
-test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN) $(DIAG_TESTS_BIN)
+test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN) $(DIAG_TESTS_BIN) $(MOTOR_TESTS_BIN)
 	@echo ""
 	$(PROTO_TESTS_BIN)
 	@echo ""
@@ -191,6 +191,8 @@ test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN
 	$(SAFETY_TESTS_BIN)
 	@echo ""
 	$(DIAG_TESTS_BIN)
+	@echo ""
+	$(MOTOR_TESTS_BIN)
 
 # Интеграционный прогон поднимает FloatCore Host и говорит с ним по настоящему
 # протоколу VESC — то же, что делает VESC Tool, только без GUI.
@@ -209,6 +211,7 @@ host: $(HOST_BIN)
 SAFETY_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(wildcard $(ROOT)/compat/imu/*.c) \
               $(wildcard $(ROOT)/compat/can/*.c) $(ROOT)/compat/vesc_protocol/packet.c \
               $(wildcard $(ROOT)/compat/motor/*.c) $(wildcard $(ROOT)/compat/log/*.c) \
+              $(wildcard $(ROOT)/compat/diag/*.c) \
               $(wildcard $(ROOT)/tests/safety/*.c) $(wildcard $(ROOT)/tests/imu/*.c) \
               $(ROOT)/tests/can/test_can.c
 SAFETY_OBJ := $(patsubst %,$(OBJ)/saf_%.o,$(notdir $(basename $(SAFETY_SRC))))
@@ -246,6 +249,10 @@ $(OBJ)/saf_%.o: $(ROOT)/compat/log/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
 
+$(OBJ)/saf_%.o: $(ROOT)/compat/diag/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
+
 $(OBJ)/saf_%.o: $(ROOT)/tests/can/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(SAFETY_CFLAGS) -MMD -MP -c $< -o $@
@@ -255,6 +262,34 @@ $(SAFETY_TESTS_BIN): $(SAFETY_OBJ)
 	$(CC) $^ -lm -o $@
 
 safety-tests: $(SAFETY_TESTS_BIN)
+
+# ------------------------- тесты транспорта мотору (host, EXPERIMENTAL)
+#
+# Третий профиль, третий двоичный файл. Собирать сериализатор моторных команд
+# в лабораторной сборке невозможно — его там нет как кода, — поэтому проверка
+# живёт отдельно и доказывает заодно, что профиль вообще собирается.
+
+MOTOR_SRC := $(ROOT)/compat/can/fc_vesc_can_motor.c $(ROOT)/compat/can/fc_vesc_can.c \
+             $(ROOT)/tests/motor/test_motor_transport.c
+MOTOR_OBJ := $(patsubst %,$(OBJ)/mot_%.o,$(notdir $(basename $(MOTOR_SRC))))
+MOTOR_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_MOTOR_EXPERIMENTAL=1 \
+                -DFLOATCORE_MOTOR_EXPERIMENTAL_WHEEL_OFF_GROUND=1 \
+                -DFLOATCORE_CAN_ACTIVE_MOTOR=1
+MOTOR_TESTS_BIN := $(BIN)/test_motor_transport
+
+$(OBJ)/mot_%.o: $(ROOT)/compat/can/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(MOTOR_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/mot_%.o: $(ROOT)/tests/motor/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(MOTOR_CFLAGS) -MMD -MP -c $< -o $@
+
+$(MOTOR_TESTS_BIN): $(MOTOR_OBJ)
+	@mkdir -p $(BIN)
+	$(CC) $^ -lm -o $@
+
+motor-tests: $(MOTOR_TESTS_BIN)
 
 # ------------------------- тесты диагностического CAN (host, ACTIVE_DIAG)
 #
@@ -314,6 +349,10 @@ can-negative-test:
 	    NEG_FILE=$(ROOT)/tests/can/negative_dual_backend.c \
 	    NEG_DEFS="-DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_ACTIVE_DIAG=1" \
 	    NEG_WHAT="backend двух половин в лабораторном профиле"
+	@$(MAKE) --no-print-directory neg-one \
+	    NEG_FILE=$(ROOT)/tests/can/negative_motor_serializer.c \
+	    NEG_DEFS="-DFLOATCORE_LAB_SAFE=1 -DFLOATCORE_CAN_ACTIVE_DIAG=1" \
+	    NEG_WHAT="сериализатор моторной команды в лабораторном профиле"
 
 # Успех цели — это ПРОВАЛ компиляции. Формулировка неочевидная, поэтому цель
 # вынесена отдельно и печатает, что именно проверялось.

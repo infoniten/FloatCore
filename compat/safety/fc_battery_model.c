@@ -94,3 +94,18 @@ bool fc_battery_model_valid(const FcBatteryModel *m, const char **why) {
 
     return true;
 }
+
+FcBatteryModel fc_battery_model_applied(void) {
+    FcBatteryModel m = {
+        .cells = 10,
+        .cut_start = 34.0f,
+        .cut_end = 31.0f,
+        .regen_cut_start = 41.5f,
+        .regen_cut_end = 42.0f,
+        .max_vin = 57.0f,
+        .min_vin = 8.0f,
+        .refloat_tiltback_lv = 3.6f,
+        .refloat_tiltback_hv = 4.0f,
+    };
+    return m;
+}
