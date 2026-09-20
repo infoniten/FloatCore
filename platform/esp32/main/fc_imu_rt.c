@@ -106,6 +106,9 @@ static struct {
     uint32_t consecutive_failures;
     uint64_t reinits;
     uint64_t last_reinit_us;
+#if FC_LAB_DIAGNOSTICS
+    volatile int accel_low_n;
+#endif
     uint32_t max_read_us;
     uint64_t iterations;
 
@@ -214,6 +217,18 @@ static void imu_rt_task(void *arg) {
             R.ahrs_decay = decay;
             fc_ahrs_configure((FcAhrs *) fc_imu_pipeline_ahrs(), kp, decay);
         }
+
+#if FC_LAB_DIAGNOSTICS
+        // Впрыск провала модуля ускорения (ТЗ v0.9C §9). Подменяется ТОЛЬКО
+        // ускорение: гироскоп остаётся настоящим, потому что проверяется
+        // именно то, что такой семпл больше не считается потерей датчика.
+        if (R.accel_low_n > 0) {
+            --R.accel_low_n;
+            for (int i = 0; i < 3; ++i) {
+                s.accel_g[i] *= 0.05f;
+            }
+        }
+#endif
 
         FcImuPipeVerdict v = fc_imu_pipeline_submit(
             err == ESP_OK, s.raw, s.accel_g, s.gyro_dps, s.temperature_c, (uint64_t) t1
@@ -371,3 +386,9 @@ bool fc_imu_rt_start(void) {
 void fc_imu_rt_stop(void) {
     R.run = false;
 }
+
+#if FC_LAB_DIAGNOSTICS
+void fc_imu_rt_inject_accel_low(int count) {
+    R.accel_low_n = count;
+}
+#endif

@@ -57,26 +57,47 @@ static bool sample_is_finite(const FcImuRawSample *s) {
     return isfinite(s->temperature_c);
 }
 
-static bool sample_is_plausible(const FcImuHealthConfig *c, const FcImuRawSample *s) {
+// Модуль ускорения, ниже которого семпл непригоден ДАЖЕ для AHRS: он делит
+// на норму (fc_ahrs.c:77 проверяет > 0.01). Всё, что выше этого и ниже
+// нижней границы правдоподобия, — не «сломанный датчик», а «поправка по
+// ускорению сейчас недостоверна», и с этим AHRS умеет обращаться сам.
+#define FC_IMU_ACCEL_UNUSABLE_G 0.01f
+
+typedef enum {
+    SAMPLE_PLAUSIBLE = 0,
+    SAMPLE_ACCEL_LOW, // годен: гироскоп цел, доверие к ускорению снизит AHRS
+    SAMPLE_UNUSABLE,  // непригоден
+} SampleVerdict;
+
+static SampleVerdict classify_sample(const FcImuHealthConfig *c, const FcImuRawSample *s) {
     float mag = sqrtf(s->accel_g[0] * s->accel_g[0] + s->accel_g[1] * s->accel_g[1] +
                       s->accel_g[2] * s->accel_g[2]);
-    if (mag < c->accel_mag_min_g) {
-        ++H.st.invalid_accel_low;
-        H.st.last_invalid_accel_mag = mag;
-        return false;
-    }
-    if (mag > c->accel_mag_max_g) {
-        ++H.st.invalid_accel_high;
-        H.st.last_invalid_accel_mag = mag;
-        return false;
-    }
+
+    // Гироскоп проверяется ПЕРВЫМ и его негодность безусловна: без него
+    // ориентацию не продолжить ничем, тогда как без акселерометра — можно.
     for (int i = 0; i < 3; ++i) {
         if (fabsf(s->gyro_dps[i]) > c->gyro_abs_max_dps) {
             ++H.st.invalid_gyro_high;
-            return false;
+            return SAMPLE_UNUSABLE;
         }
     }
-    return true;
+
+    if (mag > c->accel_mag_max_g) {
+        ++H.st.invalid_accel_high;
+        H.st.last_invalid_accel_mag = mag;
+        return SAMPLE_UNUSABLE;
+    }
+    if (mag < FC_IMU_ACCEL_UNUSABLE_G) {
+        ++H.st.invalid_accel_low;
+        H.st.last_invalid_accel_mag = mag;
+        return SAMPLE_UNUSABLE;
+    }
+    if (mag < c->accel_mag_min_g) {
+        ++H.st.accel_low_accepted;
+        H.st.last_invalid_accel_mag = mag;
+        return SAMPLE_ACCEL_LOW;
+    }
+    return SAMPLE_PLAUSIBLE;
 }
 
 static bool same_raw(const FcImuRawSample *a, const FcImuRawSample *b) {
@@ -91,9 +112,11 @@ FcImuHealthState fc_imu_health_update(bool ok, const FcImuRawSample *sample, uin
 
     if (!ok || !sample || !sample->valid) {
         ++H.st.read_errors;
+        ++H.st.consecutive_read_errors;
         H.st.state = FC_IMU_READ_ERROR;
         return H.st.state;
     }
+    H.st.consecutive_read_errors = 0;
 
     ++H.st.samples_total;
 
@@ -111,10 +134,22 @@ FcImuHealthState fc_imu_health_update(bool ok, const FcImuRawSample *sample, uin
         return H.st.state;
     }
 
-    if (!sample_is_plausible(&H.cfg, sample)) {
+    SampleVerdict sv = classify_sample(&H.cfg, sample);
+    if (sv == SAMPLE_UNUSABLE) {
         ++H.st.invalid_samples;
+        ++H.st.consecutive_invalid;
         H.st.state = FC_IMU_INVALID;
         return H.st.state;
+    }
+    H.st.consecutive_invalid = 0;
+
+    if (sv == SAMPLE_ACCEL_LOW) {
+        ++H.st.consecutive_accel_low;
+        if (H.st.consecutive_accel_low > H.st.max_consecutive_accel_low) {
+            H.st.max_consecutive_accel_low = H.st.consecutive_accel_low;
+        }
+    } else {
+        H.st.consecutive_accel_low = 0;
     }
 
     if (H.have_prev) {

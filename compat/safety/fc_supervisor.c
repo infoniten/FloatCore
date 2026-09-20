@@ -150,6 +150,32 @@ void fc_supervisor_report_imu(bool healthy, uint32_t health_state,
     }
 }
 
+void fc_supervisor_report_imu_permit(FcImuPermit permit, uint32_t reasons, uint32_t health_state,
+                                     const FcSupervisorImuTime *t, uint64_t now_us) {
+    if (t) {
+        S.imu_time = *t;
+    }
+    // OK — ориентации можно доверять. HOLD и LOST одинаково снимают вход
+    // imu_healthy, но расходятся в главном: HOLD не защёлкивает ничего и
+    // проходит сам, когда семпл снова станет свежим.
+    S.in.imu_healthy = (permit == FC_IMU_PERMIT_OK);
+
+    if (permit != FC_IMU_PERMIT_LOST) {
+        return;
+    }
+
+    uint64_t age = (S.imu_time.last_valid_us && now_us > S.imu_time.last_valid_us)
+                       ? now_us - S.imu_time.last_valid_us
+                       : 0;
+    if (age > 0xFFFFFFFFull) {
+        age = 0xFFFFFFFFull;
+    }
+    capture_imu_fault(FC_IMU_FAULT_CAUSE_HEALTH_STATE, health_state, now_us, (uint32_t) age);
+    S.imu_fault.policy_permit = (uint32_t) permit;
+    S.imu_fault.policy_reasons = reasons;
+    enter_fault(FC_FAULT_IMU_UNHEALTHY, now_us);
+}
+
 void fc_supervisor_report_imu_healthy(bool healthy, uint64_t now_us) {
     fc_supervisor_report_imu(healthy, 0, NULL, now_us);
 }

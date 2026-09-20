@@ -34,6 +34,7 @@
 #include "fc_motor_experiment.h"
 #include "../../../compat/diag/fc_gap_trace.h"
 #include "../../../compat/motor/fc_dual_motor.h"
+#include "../../../compat/safety/fc_imu_policy.h"
 #include "fc_sched.h"
 #include "../../../compat/can/fc_vesc_can.h"
 #include "../../../compat/vesc_protocol/packet.h"
@@ -92,6 +93,14 @@ static void cmd_supervisor(void) {
         printf("  причина         %s\n", fc_imu_fault_cause_name(f->cause));
         printf("  здоровье        %s\n",
                fc_imu_health_state_name((FcImuHealthState) f->health_state));
+        printf("  политика        %s, причины 0x%02" PRIx32 "\n",
+               fc_imu_permit_name((FcImuPermit) f->policy_permit), f->policy_reasons);
+        for (int b_ = 0; b_ < FC_IMU_POLICY_REASON_COUNT; ++b_) {
+            if (f->policy_reasons & (1u << b_)) {
+                printf("    - %s\n",
+                       fc_imu_policy_reason_name((FcImuPolicyReason) (1u << b_)));
+            }
+        }
         printf("  now             %llu мкс\n", (unsigned long long) f->now_us);
         printf("  посл. принятый  %llu мкс, предыдущий %llu\n",
                (unsigned long long) f->time.last_valid_us,
@@ -1155,6 +1164,7 @@ static void cmd_help(void) {
     printf("                         imu_stress-log\n");
 #endif
     printf("зазоры IMU:              gaps [порог_мкс] | gaps-reset | imu-stall-confirm <мс>\n");
+    printf("политика IMU:            imu-policy | imu-accel-low-confirm <N>\n");
 #if FC_MOTOR_BACKEND_AVAILABLE
     printf("МОТОРНЫЙ СТЕНД (колесо вывешено!):\n");
     printf("                         motor-status | motor-arm | motor-disarm\n");
@@ -1330,6 +1340,63 @@ static void cmd_imu_stall(const char *arg) {
 }
 #endif
 
+
+#if FC_LAB_DIAGNOSTICS
+static void cmd_imu_accel_low(const char *arg) {
+    int n = arg && *arg ? atoi(arg) : 1;
+    if (n < 1 || n > 500) {
+        printf("imu-accel-low-confirm <N 1..500>\n");
+        printf("  подменяет модуль ускорения у N семплов подряд.\n");
+        printf("  до %u подряд — тяга не снимается; до %u — снимается без защёлки;\n",
+               (unsigned) (20000u / 2000u), (unsigned) (40000u / 2000u));
+        printf("  дальше — защёлка.\n");
+        return;
+    }
+    fc_imu_rt_inject_accel_low(n);
+    printf("впрыск: %d семплов с малым модулем ускорения\n", n);
+}
+
+static void cmd_imu_policy(void) {
+    FcImuHealthStatus h = fc_imu_health_status();
+    FcImuTimeline tl = fc_imu_pipeline_timeline();
+    FcImuPolicyConfig pc = fc_imu_policy_default_config();
+    uint64_t now = fc_uptime_us();
+    FcImuPolicyInputs in = {
+        .now_us = now,
+        .last_valid_us = tl.last_valid_us,
+        .have_valid = tl.sequence > 0,
+        .consecutive_read_failures = h.consecutive_read_errors,
+        .consecutive_invalid = h.consecutive_invalid,
+        .consecutive_accel_low = h.consecutive_accel_low,
+        .bus_stuck = false,
+        .reinit_failed = false,
+    };
+    uint32_t reasons = 0;
+    FcImuPermit p = fc_imu_policy_evaluate(&pc, &in, &reasons);
+    printf("политика IMU      %s\n", fc_imu_permit_name(p));
+    printf("  пороги          свежесть %" PRIu32 " мкс, защёлка %" PRIu32
+           " мкс; серии %" PRIu32 " и %" PRIu32 " семплов\n",
+           pc.torque_freshness_us, pc.latch_age_us, pc.hold_samples, pc.latch_samples);
+    printf("  возраст         %llu мкс, номер семпла %" PRIu32 "\n",
+           (unsigned long long) (now > tl.last_valid_us ? now - tl.last_valid_us : 0),
+           tl.sequence);
+    printf("  серии подряд    обменов %" PRIu32 ", непригодных %" PRIu32
+           ", малое |a| %" PRIu32 " (макс %" PRIu32 ")\n",
+           h.consecutive_read_errors, h.consecutive_invalid, h.consecutive_accel_low,
+           h.max_consecutive_accel_low);
+    printf("  малое |a|       принято %llu семплов, отвергнуто %llu\n",
+           (unsigned long long) h.accel_low_accepted,
+           (unsigned long long) h.invalid_accel_low);
+    if (reasons) {
+        for (int b = 0; b < FC_IMU_POLICY_REASON_COUNT; ++b) {
+            if (reasons & (1u << b)) {
+                printf("    - %s\n", fc_imu_policy_reason_name((FcImuPolicyReason) (1u << b)));
+            }
+        }
+    }
+}
+#endif
+
 static void dispatch(const char *line) {
     if (!strcmp(line, "status")) {
         cmd_status();
@@ -1440,6 +1507,13 @@ static void dispatch(const char *line) {
         cmd_gaps(line[4] == ' ' ? line + 5 : NULL);
     } else if (!strcmp(line, "gaps-reset")) {
         cmd_gaps_reset();
+#if FC_LAB_DIAGNOSTICS
+    } else if (!strcmp(line, "imu-policy")) {
+        cmd_imu_policy();
+    } else if (!strncmp(line, "imu-accel-low-confirm", 21) &&
+               (line[21] == 0 || line[21] == ' ')) {
+        cmd_imu_accel_low(line[21] == ' ' ? line + 22 : NULL);
+#endif
 #if FC_LAB_DIAGNOSTICS
     } else if (!strncmp(line, "imu-stall-confirm", 17) &&
                (line[17] == 0 || line[17] == ' ')) {

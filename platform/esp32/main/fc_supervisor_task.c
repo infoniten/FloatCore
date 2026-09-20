@@ -11,6 +11,7 @@
 
 #include "fc_gap_port.h"
 #include "../../../compat/imu/fc_imu_pipeline.h"
+#include "../../../compat/safety/fc_imu_policy.h"
 #include "fc_platform.h"
 
 #include "../../../compat/safety/fc_imu_health.h"
@@ -47,7 +48,6 @@ static void supervisor_task(void *arg) {
         // задаче чтения — иначе замолчавшая задача перестала бы и проверять
         // саму себя.
         FcImuHealthState hs = fc_imu_health_poll(now);
-        bool imu_ok = (hs == FC_IMU_OK);
         // NOT_INITIALIZED не объявляется отказом, но и здоровьем не
         // объявляется тоже: вход imu_healthy просто остаётся в исходном
         // false, а READY без него недостижим (fc_supervisor.c,
@@ -68,7 +68,30 @@ static void supervisor_task(void *arg) {
                 .last_verdict = tl.last_verdict,
                 .last_poll_us = tl.last_poll_us,
             };
-            fc_supervisor_report_imu(imu_ok, (uint32_t) hs, &st, now);
+            // Решение принимает политика, а не состояние модуля здоровья.
+            // Прежде одиночный сбой чтения или один отвергнутый семпл
+            // защёлкивали отказ навсегда; теперь право на тягу зависит от
+            // того, есть ли прямо сейчас свежая и достоверная ориентация
+            // (docs/imu_health_policy.md).
+            FcImuHealthStatus hst = fc_imu_health_status();
+            FcImuPolicyConfig pc = fc_imu_policy_default_config();
+            FcImuPolicyInputs pin = {
+                .now_us = now,
+                .last_valid_us = tl.last_valid_us,
+                .have_valid = tl.sequence > 0,
+                .consecutive_read_failures = hst.consecutive_read_errors,
+                .consecutive_invalid = hst.consecutive_invalid,
+                .consecutive_accel_low = hst.consecutive_accel_low,
+                // Залипание шины и неудачу переинициализации платформа пока
+                // не сообщает. Подставлять сюда false — значит утверждать,
+                // что их не бывает; поэтому они остаются явными нулями с
+                // этим комментарием, а не молчаливым умолчанием.
+                .bus_stuck = false,
+                .reinit_failed = false,
+            };
+            uint32_t reasons = 0;
+            FcImuPermit permit = fc_imu_policy_evaluate(&pc, &pin, &reasons);
+            fc_supervisor_report_imu_permit(permit, reasons, (uint32_t) hs, &st, now);
         }
 
         // Watchdog: срабатывание TWDT видно по причине предыдущего сброса и

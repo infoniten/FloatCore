@@ -26,6 +26,7 @@ idf_component_register(
         "../../../compat/safety/fc_supervisor.c"
         "../../../compat/safety/fc_motor_gate.c"
         "../../../compat/safety/fc_imu_health.c"
+        "../../../compat/safety/fc_imu_policy.c"
         "../../../compat/safety/fc_command_watchdog.c"
         "../../../compat/safety/fc_battery_model.c"
         "../../../compat/safety/fc_motor_permit.c"

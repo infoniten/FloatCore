@@ -66,6 +66,21 @@ typedef struct {
     uint64_t invalid_accel_high;
     uint64_t invalid_gyro_high;
     float last_invalid_accel_mag;
+
+    // Серии подряд. Политика (fc_imu_policy.h) решает по ним, а не по
+    // одиночному событию: одиночный транзиент не отнимает ориентацию, а
+    // серия отнимает.
+    uint32_t consecutive_read_errors;
+    uint32_t consecutive_invalid;
+    uint32_t consecutive_accel_low;
+    uint32_t max_consecutive_accel_low;
+
+    // Семплы с малым модулем ускорения, ПРИНЯТЫЕ к обработке. Выделены
+    // отдельно от отвергнутых: для AHRS они пригодны, он сам снижает доверие
+    // к акселерометру по отклонению модуля от 1 g (fc_ahrs.c:83) и при
+    // нулевом доверии интегрирует по одному гироскопу. Выбрасывать такой
+    // семпл целиком значит терять ещё и годный гироскоп.
+    uint64_t accel_low_accepted;
     uint64_t stuck_events;
     uint64_t stale_events;
     uint64_t timeout_events;

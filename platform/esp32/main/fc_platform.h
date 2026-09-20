@@ -198,6 +198,15 @@ uint64_t fc_imu_rt_reinits(void);
 uint32_t fc_imu_rt_stack_watermark(void);
 
 void fc_imu_rt_inject_stall(int ms);
+
+#if FC_LAB_DIAGNOSTICS
+/**
+ * Подменить модуль ускорения у следующих count семплов на заведомо малый
+ * (ТЗ v0.9C §9). Гироскоп не трогается: проверяется, что такой семпл
+ * остаётся пригодным и не равен потере датчика.
+ */
+void fc_imu_rt_inject_accel_low(int count);
+#endif
 // Статус постоянной калибровки (значения FcImuCalStatus из compat/imu).
 int fc_imu_rt_cal_status(void);
 void fc_imu_rt_set_cal_status(int s);

@@ -9,6 +9,8 @@
 // без платы и без таймеров.
 #pragma once
 
+#include "fc_imu_policy.h"
+
 #include "fc_build_profile.h"
 
 #include <stdbool.h>
@@ -100,6 +102,8 @@ typedef struct {
 typedef struct {
     FcImuFaultCause cause;
     uint32_t health_state;     // состояние модуля здоровья в момент отказа
+    uint32_t policy_permit;    // вердикт политики (FcImuPermit)
+    uint32_t policy_reasons;   // маска причин политики
     uint64_t now_us;
     uint32_t computed_age_us;  // now - last_valid, как его посчитал супервизор
     FcSupervisorImuTime time;
@@ -192,6 +196,15 @@ bool fc_supervisor_clear_fault(uint64_t now_us);
  */
 void fc_supervisor_report_imu(bool healthy, uint32_t health_state,
                               const FcSupervisorImuTime *t, uint64_t now_us);
+
+/**
+ * Сообщить вердикт политики. Трёхзначный, в отличие от прежнего
+ * «здоров / не здоров»: HOLD снимает тягу, но НЕ защёлкивает отказ, и
+ * положение восстанавливается само, когда ориентация снова становится
+ * свежей. LOST защёлкивает.
+ */
+void fc_supervisor_report_imu_permit(FcImuPermit permit, uint32_t reasons, uint32_t health_state,
+                                     const FcSupervisorImuTime *t, uint64_t now_us);
 
 const char *fc_imu_fault_cause_name(FcImuFaultCause c);
 

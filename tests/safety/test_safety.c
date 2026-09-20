@@ -26,6 +26,7 @@ void test_can_all(void);
 void test_motor_prep_all(void);
 void test_motor_backend_all(void);
 void test_imu_time_model_all(void);
+void test_imu_policy_all(void);
 
 static void check(bool ok, const char *what) {
     ++g_checks;
@@ -411,6 +412,7 @@ int main(void) {
     test_motor_prep_all();
     test_motor_backend_all();
     test_imu_time_model_all();
+    test_imu_policy_all();
 
     printf("\n================================================================\n");
     if (g_fail == 0) {
