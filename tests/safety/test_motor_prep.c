@@ -208,34 +208,70 @@ static void test_motor_model(void) {
     const FcMotorParam *all = fc_motor_model_all(&n);
     check(n > 0 && all != NULL, "таблица параметров не пуста");
 
+    // После v0.8A половины различаются: к 118 подключён мотор и её параметры
+    // измерены, у 100 мотора нет. Проверяем именно это различие, а не
+    // усреднённое «доверие» — усреднение скрыло бы, что готова только одна.
     const FcMotorParam *poles = fc_motor_model_find("si_motor_poles");
     check(poles != NULL, "число полюсов есть в модели");
-    check(poles->trust == FC_PARAM_UNVERIFIED, "число полюсов помечено НЕ ПОДТВЕРЖДЁННЫМ");
+    check(poles->value_a == 30.0f, "у половины A измерено 30 полюсов");
+    check(poles->trust_a == FC_PARAM_VERIFIED, "полюса подтверждены на моторе A");
+    check(poles->value_b == 14.0f && poles->trust_b == FC_PARAM_UNVERIFIED,
+          "у половины B по-прежнему 14 и НЕ подтверждено");
     check(poles->kind == FC_PARAM_CONFIGURED,
-          "число полюсов — введённое значение, а не результат детекции");
-    check(!poles->safe_before_detection, "опираться на него до проверки нельзя");
+          "число полюсов — введённое значение: детекция FOC его не определяет");
+    note("критерий: %s", poles->verify_criterion);
 
     const FcMotorParam *flux = fc_motor_model_find("foc_motor_flux_linkage");
-    check(flux != NULL && flux->trust == FC_PARAM_READ_FROM_ESC,
-          "flux прочитан из ESC, но не подтверждён на моторе");
-    check(flux->must_refresh_after_detection, "flux обязан быть обновлён после детекции");
-    check(!flux->safe_before_detection, "до детекции опираться на flux нельзя");
+    check(flux != NULL, "потокосцепление есть в модели");
+    check(flux->value_a > 0.015f && flux->value_a < 0.025f,
+          "у половины A измерено около 19.6 мВб");
+    check(flux->trust_a == FC_PARAM_VERIFIED, "потокосцепление подтверждено на моторе A");
+    check(flux->value_b == 0.1f && flux->trust_b == FC_PARAM_UNVERIFIED,
+          "у половины B осталось 0.1 и НЕ подтверждено");
+
+    const FcMotorParam *r = fc_motor_model_find("foc_motor_r");
+    check(r != NULL && r->trust_a == FC_PARAM_VERIFIED,
+          "сопротивление подтверждено детекцией на моторе A");
+    check(r->trust_b == FC_PARAM_READ_FROM_ESC,
+          "у половины B сопротивление только прочитано");
+
+    const FcMotorParam *cells = fc_motor_model_find("si_battery_cells");
+    check(cells != NULL && cells->value_a == 10.0f && cells->value_b == 10.0f,
+          "число ячеек 10 на обеих половинах");
+    check(cells->trust_a == FC_PARAM_VERIFIED && cells->trust_b == FC_PARAM_VERIFIED,
+          "число ячеек подтверждено измерением напряжения");
 
     const FcMotorParam *imax = fc_motor_model_find("l_current_max");
     check(imax != NULL && imax->kind == FC_PARAM_SAFETY_POLICY,
           "предел тока — решение о безопасности, а не свойство мотора");
+    check(imax->value_a == 5.0f, "на половине A стоит временный предел прокрута 5 А");
+    check(imax->value_b == 25.0f, "на половине B рабочие 25 А не менялись");
     check(!imax->must_refresh_after_detection, "детекция не должна менять предел тока");
-    check(imax->safe_before_detection, "на предел можно опираться и до детекции");
 
-    const FcMotorParam *cells = fc_motor_model_find("si_battery_cells");
-    check(cells != NULL && cells->trust == FC_PARAM_UNVERIFIED,
-          "число ячеек помечено неподтверждённым");
+    const FcMotorParam *wheel = fc_motor_model_find("si_wheel_diameter");
+    check(wheel != NULL && wheel->trust_a == FC_PARAM_UNVERIFIED &&
+              wheel->trust_b == FC_PARAM_UNVERIFIED,
+          "диаметр колеса не подтверждён ни на одной половине");
 
     const char *why = NULL;
     check(!fc_motor_model_ready_for_output(&why),
           "модель НЕ готова к выходу на мотор");
     note("первое непройденное: %s", why ? why : "-");
-    note("неподтверждённых параметров: %zu из %zu", fc_motor_model_unverified_count(), n);
+    note("неподтверждённых хотя бы на одной половине: %zu из %zu",
+         fc_motor_model_unverified_count(), n);
+
+    // Готовность одной половины не делает машину готовой: требование
+    // «подтверждено на обеих» намеренно строгое, машина двухмоторная.
+    int verified_a = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (all[i].trust_a == FC_PARAM_VERIFIED) {
+            ++verified_a;
+        }
+    }
+    check(verified_a > 0, "на половине A уже есть подтверждённые параметры");
+    check(!fc_motor_model_ready_for_output(NULL),
+          "но модель всё равно не готова: половина B не подтверждена");
+    note("подтверждено на половине A: %d параметров из %zu", verified_a, n);
 
     // Каждый параметр, измеряемый детекцией, обязан требовать обновления
     // после неё: иначе смысл детекции теряется.
@@ -251,8 +287,6 @@ static void test_motor_model(void) {
     check(detected > 0 && detected == must_refresh,
           "все измеряемые детекцией параметры помечены к обновлению после неё");
 
-    // У каждого параметра должен быть записан критерий подтверждения
-    // (ТЗ v0.7D §15). «Когда-нибудь проверим» — не критерий.
     int with_criterion = 0;
     for (size_t i = 0; i < n; ++i) {
         if (all[i].verify_criterion && all[i].verify_criterion[0]) {
@@ -260,7 +294,6 @@ static void test_motor_model(void) {
         }
     }
     check(with_criterion == (int) n, "у каждого параметра записан критерий подтверждения");
-    note("критерий для полюсов: %s", poles->verify_criterion);
 }
 
 // ---------------------------------------- пороги отката против отсечек ESC

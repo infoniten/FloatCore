@@ -24,6 +24,14 @@ import struct
 import sys
 import time
 
+# Раскладка полей лежит в репозитории, а не выводится на ходу из скачанного
+# исходника. Причина простая: файл во временном каталоге исчезает, и вместе с
+# ним перестаёт работать сверка резервных копий — ровно тогда, когда она
+# нужна. Перегенерировать и проверить соответствие upstream:
+#     python3 tools/gen_vesc_layout.py --fw release_6_06 [--verify]
+LAYOUT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vesc_layout")
+DEFAULT_FW = "release_6_06"
+
 
 def u32(b, i):
     return struct.unpack_from(">I", b, i)[0], i + 4
@@ -47,37 +55,30 @@ SIZE = {"uint8": 1, "int8": 1, "uint16": 2, "int16": 2, "uint32": 4, "int32": 4,
         "float16": 2, "float32": 4, "float32_auto": 4, "u8": 1}
 
 
-def build_map(cg_path, func, struct_name):
-    """Разложить сериализатор bldc на поля: имя -> (смещение, тип, масштаб).
+def build_map(fw_or_path, func, struct_name=None):
+    """Вернуть раскладку как {имя: (смещение, тип, масштаб)}.
 
-    Разбирается ИСХОДНИК confgenerator.c, а не таблица, переписанная руками.
-    Смысл в том, что раскладка обязана совпадать с прошивкой побайтово, а
-    переписанная таблица расходится с ней молча.
+    fw_or_path — имя версии прошивки (файл tools/vesc_layout/<fw>.json) либо
+    прямой путь к такому файлу. Аргумент struct_name сохранён для
+    совместимости вызовов и не используется.
     """
-    text = open(cg_path, encoding="latin1").read()
-    m = re.search(r"int32_t " + func + r"\(uint8_t \*buffer, const " + struct_name +
-                  r" \*conf\) \{(.*?)\n\}", text, re.S)
-    if not m:
-        raise SystemExit(f"не найден сериализатор {func} в {cg_path}")
-    body = re.sub(r"//[^\n]*", "", m.group(1))
-    off = 0
+    del struct_name
+    section = {"confgenerator_serialize_mcconf": "mcconf",
+               "confgenerator_serialize_appconf": "appconf"}[func]
+    path = fw_or_path
+    if not os.path.exists(path):
+        path = os.path.join(LAYOUT_DIR, f"{fw_or_path}.json")
+    if not os.path.exists(path):
+        path = os.path.join(LAYOUT_DIR, f"{DEFAULT_FW}.json")
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"нет таблицы раскладки {path}; выполните "
+            f"python3 tools/gen_vesc_layout.py --fw {DEFAULT_FW}")
+    doc = json.load(open(path))
     rows = {}
-    for stmt in [x.strip().replace("\n", " ") for x in body.split(";")]:
-        mm = re.search(r"buffer_append_(\w+)\(buffer,\s*(.*?),\s*&ind\)", stmt)
-        if mm:
-            kind, arg = mm.group(1), mm.group(2)
-            name = re.search(r"conf->([\w\[\]\.]+)", arg)
-            scale = re.search(r",\s*([\d.e+]+)\s*$", arg)
-            rows[name.group(1) if name else "SIGNATURE"] = (
-                off, kind, float(scale.group(1)) if scale else 1.0)
-            off += SIZE[kind]
-            continue
-        mm = re.search(r"buffer\[ind\+\+\]\s*=\s*(.*)", stmt)
-        if mm:
-            name = re.search(r"conf->([\w\[\]\.]+)", mm.group(1))
-            rows[name.group(1) if name else "?"] = (off, "u8", 1.0)
-            off += 1
-    rows["__total__"] = (off, "u8", 1.0)
+    for f in doc[section]["fields"]:
+        rows[f["name"]] = (f["offset"], f["kind"], f["scale"])
+    rows["__total__"] = (doc[section]["total_bytes"], "u8", 1.0)
     return rows
 
 
@@ -147,14 +148,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", action="append", required=True,
                     help="вывод can-diag-hex, можно несколько раз")
-    ap.add_argument("--cg", default="/tmp/bldc/cg.c",
-                    help="confgenerator.c из той же версии прошивки")
+    ap.add_argument("--fw", default=DEFAULT_FW,
+                    help="версия прошивки: tools/vesc_layout/<fw>.json")
     ap.add_argument("--out", default="build/debug/backup_v07d1")
     ap.add_argument("--label", default=time.strftime("%Y%m%d-%H%M%S"))
     a = ap.parse_args()
 
-    mc = build_map(a.cg, "confgenerator_serialize_mcconf", "mc_configuration")
-    app = build_map(a.cg, "confgenerator_serialize_appconf", "app_configuration")
+    mc = build_map(a.fw, "confgenerator_serialize_mcconf")
+    app = build_map(a.fw, "confgenerator_serialize_appconf")
 
     blobs = {}
     for path in a.log:

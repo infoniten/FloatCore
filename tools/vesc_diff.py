@@ -14,7 +14,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from vesc_backup import build_map, parse_console_log, get  # noqa: E402
+from vesc_backup import build_map, parse_console_log, get, DEFAULT_FW  # noqa: E402
 
 # Поля, которые ESC перемеряет при каждом включении. Их расхождение между
 # двумя чтениями ожидаемо и не означает, что кто-то что-то записал
@@ -50,13 +50,14 @@ def main():
     ap.add_argument("--id", type=int, required=True)
     ap.add_argument("--expect", action="append", default=[],
                     help="ожидаемое изменение: поле=старое:новое")
-    ap.add_argument("--cg", default="/tmp/bldc/cg.c")
+    ap.add_argument("--fw", default=DEFAULT_FW,
+                    help="версия прошивки: tools/vesc_layout/<fw>.json")
     a = ap.parse_args()
 
     if a.request == "GET_MCCONF":
-        rows = build_map(a.cg, "confgenerator_serialize_mcconf", "mc_configuration")
+        rows = build_map(a.fw, "confgenerator_serialize_mcconf")
     else:
-        rows = build_map(a.cg, "confgenerator_serialize_appconf", "app_configuration")
+        rows = build_map(a.fw, "confgenerator_serialize_appconf")
 
     before = open(a.before, "rb").read()
     blobs = parse_console_log(a.after_log)

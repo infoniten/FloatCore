@@ -1,0 +1,1942 @@
+{
+ "firmware": "release_6_06",
+ "source_url": "https://raw.githubusercontent.com/vedderb/bldc/release_6_06/confgenerator.c",
+ "source_sha256": "d7d11022db90e9ce0bc989140bf5f36c5a7f751736405bc74e226fe228aab1c5",
+ "note": "\u0421\u043c\u0435\u0449\u0435\u043d\u0438\u044f \u2014 \u0432\u043d\u0443\u0442\u0440\u0438 \u0421\u0415\u0420\u0418\u0410\u041b\u0418\u0417\u041e\u0412\u0410\u041d\u041d\u041e\u0413\u041e \u0431\u043b\u043e\u043a\u0430. \u0412 \u043e\u0442\u0432\u0435\u0442\u0435 COMM_GET_* \u0438\u043c \u043f\u0440\u0435\u0434\u0448\u0435\u0441\u0442\u0432\u0443\u0435\u0442 \u043e\u0434\u0438\u043d \u0431\u0430\u0439\u0442 \u0441 \u043d\u043e\u043c\u0435\u0440\u043e\u043c \u043f\u0430\u043a\u0435\u0442\u0430, \u043f\u043e\u044d\u0442\u043e\u043c\u0443 \u0441\u043c\u0435\u0449\u0435\u043d\u0438\u0435 \u0432 \u043e\u0442\u0432\u0435\u0442\u0435 \u043d\u0430 \u0435\u0434\u0438\u043d\u0438\u0446\u0443 \u0431\u043e\u043b\u044c\u0448\u0435.",
+ "mcconf": {
+  "total_bytes": 483,
+  "fields": [
+   {
+    "name": "SIGNATURE",
+    "offset": 0,
+    "kind": "uint32",
+    "scale": 1.0
+   },
+   {
+    "name": "pwm_mode",
+    "offset": 4,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "comm_mode",
+    "offset": 5,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "motor_type",
+    "offset": 6,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "sensor_mode",
+    "offset": 7,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "l_current_max",
+    "offset": 8,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_current_min",
+    "offset": 12,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_in_current_max",
+    "offset": 16,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_in_current_min",
+    "offset": 20,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_in_current_map_start",
+    "offset": 24,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "l_in_current_map_filter",
+    "offset": 26,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "l_abs_current_max",
+    "offset": 28,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_min_erpm",
+    "offset": 32,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_max_erpm",
+    "offset": 36,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_erpm_start",
+    "offset": 40,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "l_max_erpm_fbrake",
+    "offset": 42,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_max_erpm_fbrake_cc",
+    "offset": 46,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_min_vin",
+    "offset": 50,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "l_max_vin",
+    "offset": 52,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "l_battery_cut_start",
+    "offset": 54,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "l_battery_cut_end",
+    "offset": 56,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "l_battery_regen_cut_start",
+    "offset": 58,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "l_battery_regen_cut_end",
+    "offset": 60,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "l_slow_abs_current",
+    "offset": 62,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "l_temp_fet_start",
+    "offset": 63,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "l_temp_fet_end",
+    "offset": 64,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "l_temp_motor_start",
+    "offset": 65,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "l_temp_motor_end",
+    "offset": 66,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "l_temp_accel_dec",
+    "offset": 67,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "l_min_duty",
+    "offset": 69,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "l_max_duty",
+    "offset": 71,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "l_watt_max",
+    "offset": 73,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_watt_min",
+    "offset": 77,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "l_current_max_scale",
+    "offset": 81,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "l_current_min_scale",
+    "offset": 83,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "l_duty_start",
+    "offset": 85,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "sl_min_erpm",
+    "offset": 87,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "sl_min_erpm_cycle_int_limit",
+    "offset": 91,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "sl_max_fullbreak_current_dir_change",
+    "offset": 95,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "sl_cycle_int_limit",
+    "offset": 99,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "sl_phase_advance_at_br",
+    "offset": 101,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "sl_cycle_int_rpm_br",
+    "offset": 103,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "sl_bemf_coupling_k",
+    "offset": 107,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_table[0]",
+    "offset": 111,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_table[1]",
+    "offset": 112,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_table[2]",
+    "offset": 113,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_table[3]",
+    "offset": 114,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_table[4]",
+    "offset": 115,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_table[5]",
+    "offset": 116,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_table[6]",
+    "offset": 117,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_table[7]",
+    "offset": 118,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "hall_sl_erpm",
+    "offset": 119,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_current_kp",
+    "offset": 123,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_current_ki",
+    "offset": 127,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_f_zv",
+    "offset": 131,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_dt_us",
+    "offset": 135,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_encoder_inverted",
+    "offset": 139,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_encoder_offset",
+    "offset": 140,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_encoder_ratio",
+    "offset": 144,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_sensor_mode",
+    "offset": 148,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_pll_kp",
+    "offset": 149,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_pll_ki",
+    "offset": 153,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_motor_l",
+    "offset": 157,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_motor_ld_lq_diff",
+    "offset": 161,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_motor_r",
+    "offset": 165,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_motor_flux_linkage",
+    "offset": 169,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_observer_gain",
+    "offset": 173,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_observer_gain_slow",
+    "offset": 177,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_observer_offset",
+    "offset": 181,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "foc_duty_dowmramp_kp",
+    "offset": 183,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_duty_dowmramp_ki",
+    "offset": 187,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_start_curr_dec",
+    "offset": 191,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_start_curr_dec_rpm",
+    "offset": 193,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_openloop_rpm",
+    "offset": 197,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_openloop_rpm_low",
+    "offset": 201,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "foc_d_gain_scale_start",
+    "offset": 203,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "foc_d_gain_scale_max_mod",
+    "offset": 205,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "foc_sl_openloop_hyst",
+    "offset": 207,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "foc_sl_openloop_time_lock",
+    "offset": 209,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "foc_sl_openloop_time_ramp",
+    "offset": 211,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "foc_sl_openloop_time",
+    "offset": 213,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "foc_sl_openloop_boost_q",
+    "offset": 215,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "foc_sl_openloop_max_q",
+    "offset": 217,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "foc_hall_table[0]",
+    "offset": 219,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hall_table[1]",
+    "offset": 220,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hall_table[2]",
+    "offset": 221,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hall_table[3]",
+    "offset": 222,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hall_table[4]",
+    "offset": 223,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hall_table[5]",
+    "offset": 224,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hall_table[6]",
+    "offset": 225,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hall_table[7]",
+    "offset": 226,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hall_interp_erpm",
+    "offset": 227,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_sl_erpm_start",
+    "offset": 231,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_sl_erpm",
+    "offset": 235,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_control_sample_mode",
+    "offset": 239,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_current_sample_mode",
+    "offset": 240,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_sat_comp_mode",
+    "offset": 241,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_sat_comp",
+    "offset": 242,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "foc_temp_comp",
+    "offset": 244,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_temp_comp_base_temp",
+    "offset": 245,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "foc_current_filter_const",
+    "offset": 247,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_cc_decoupling",
+    "offset": 249,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_observer_type",
+    "offset": 250,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hfi_amb_mode",
+    "offset": 251,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hfi_amb_current",
+    "offset": 252,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "foc_hfi_amb_tres",
+    "offset": 254,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hfi_voltage_start",
+    "offset": 255,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "foc_hfi_voltage_run",
+    "offset": 257,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "foc_hfi_voltage_max",
+    "offset": 259,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "foc_hfi_gain",
+    "offset": 261,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "foc_hfi_max_err",
+    "offset": 263,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "foc_hfi_hyst",
+    "offset": 265,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "foc_sl_erpm_hfi",
+    "offset": 267,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hfi_start_samples",
+    "offset": 271,
+    "kind": "uint16",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hfi_obs_ovr_sec",
+    "offset": 273,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_hfi_samples",
+    "offset": 277,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_offsets_cal_mode",
+    "offset": 278,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_offsets_current[0]",
+    "offset": 279,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_offsets_current[1]",
+    "offset": 283,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_offsets_current[2]",
+    "offset": 287,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_offsets_voltage[0]",
+    "offset": 291,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_offsets_voltage[1]",
+    "offset": 293,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_offsets_voltage[2]",
+    "offset": 295,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_offsets_voltage_undriven[0]",
+    "offset": 297,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_offsets_voltage_undriven[1]",
+    "offset": 299,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_offsets_voltage_undriven[2]",
+    "offset": 301,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_phase_filter_enable",
+    "offset": 303,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_phase_filter_disable_fault",
+    "offset": 304,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_phase_filter_max_erpm",
+    "offset": 305,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_mtpa_mode",
+    "offset": 309,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_fw_current_max",
+    "offset": 310,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_fw_duty_start",
+    "offset": 314,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_fw_ramp_time",
+    "offset": 316,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "foc_fw_q_current_factor",
+    "offset": 318,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "foc_speed_soure",
+    "offset": 320,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_short_ls_on_zero_duty",
+    "offset": 321,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "foc_overmod_factor",
+    "offset": 322,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "sp_pid_loop_rate",
+    "offset": 324,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "s_pid_kp",
+    "offset": 325,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "s_pid_ki",
+    "offset": 329,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "s_pid_kd",
+    "offset": 333,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "s_pid_kd_filter",
+    "offset": 337,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "s_pid_min_erpm",
+    "offset": 339,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "s_pid_allow_braking",
+    "offset": 343,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "s_pid_ramp_erpms_s",
+    "offset": 344,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "s_pid_speed_source",
+    "offset": 348,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "p_pid_kp",
+    "offset": 349,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "p_pid_ki",
+    "offset": 353,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "p_pid_kd",
+    "offset": 357,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "p_pid_kd_proc",
+    "offset": 361,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "p_pid_kd_filter",
+    "offset": 365,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "p_pid_ang_div",
+    "offset": 367,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "p_pid_gain_dec_angle",
+    "offset": 371,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "p_pid_offset",
+    "offset": 373,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "cc_startup_boost_duty",
+    "offset": 377,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "cc_min_current",
+    "offset": 379,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "cc_gain",
+    "offset": 383,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "cc_ramp_step_max",
+    "offset": 387,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "m_fault_stop_time_ms",
+    "offset": 389,
+    "kind": "int32",
+    "scale": 1.0
+   },
+   {
+    "name": "m_duty_ramp_step",
+    "offset": 393,
+    "kind": "float16",
+    "scale": 10000.0
+   },
+   {
+    "name": "m_current_backoff_gain",
+    "offset": 395,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "m_encoder_counts",
+    "offset": 399,
+    "kind": "uint32",
+    "scale": 1.0
+   },
+   {
+    "name": "m_encoder_sin_amp",
+    "offset": 403,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "m_encoder_cos_amp",
+    "offset": 405,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "m_encoder_sin_offset",
+    "offset": 407,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "m_encoder_cos_offset",
+    "offset": 409,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "m_encoder_sincos_filter_constant",
+    "offset": 411,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "m_encoder_sincos_phase_correction",
+    "offset": 413,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "m_sensor_port_mode",
+    "offset": 415,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "m_invert_direction",
+    "offset": 416,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "m_drv8301_oc_mode",
+    "offset": 417,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "m_drv8301_oc_adj",
+    "offset": 418,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "m_bldc_f_sw_min",
+    "offset": 419,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "m_bldc_f_sw_max",
+    "offset": 423,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "m_dc_f_sw",
+    "offset": 427,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "m_ntc_motor_beta",
+    "offset": 431,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "m_out_aux_mode",
+    "offset": 435,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "m_motor_temp_sens_type",
+    "offset": 436,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "m_ptc_motor_coeff",
+    "offset": 437,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "m_ntcx_ptcx_res",
+    "offset": 441,
+    "kind": "float16",
+    "scale": 0.1
+   },
+   {
+    "name": "m_ntcx_ptcx_temp_base",
+    "offset": 443,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "m_hall_extra_samples",
+    "offset": 445,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "m_batt_filter_const",
+    "offset": 446,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "si_motor_poles",
+    "offset": 447,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "si_gear_ratio",
+    "offset": 448,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "si_wheel_diameter",
+    "offset": 452,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "si_battery_type",
+    "offset": 456,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "si_battery_cells",
+    "offset": 457,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "si_battery_ah",
+    "offset": 458,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "si_motor_nl_current",
+    "offset": 462,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "bms.type",
+    "offset": 466,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "bms.limit_mode",
+    "offset": 467,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "bms.t_limit_start",
+    "offset": 468,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "bms.t_limit_end",
+    "offset": 469,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "bms.soc_limit_start",
+    "offset": 470,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "bms.soc_limit_end",
+    "offset": 472,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "bms.vmin_limit_start",
+    "offset": 474,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "bms.vmin_limit_end",
+    "offset": 476,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "bms.vmax_limit_start",
+    "offset": 478,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "bms.vmax_limit_end",
+    "offset": 480,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "bms.fwd_can_mode",
+    "offset": 482,
+    "kind": "u8",
+    "scale": 1.0
+   }
+  ]
+ },
+ "appconf": {
+  "total_bytes": 278,
+  "fields": [
+   {
+    "name": "SIGNATURE",
+    "offset": 0,
+    "kind": "uint32",
+    "scale": 1.0
+   },
+   {
+    "name": "controller_id",
+    "offset": 4,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "timeout_msec",
+    "offset": 5,
+    "kind": "uint32",
+    "scale": 1.0
+   },
+   {
+    "name": "timeout_brake_current",
+    "offset": 9,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "can_status_rate_1",
+    "offset": 13,
+    "kind": "uint16",
+    "scale": 1.0
+   },
+   {
+    "name": "can_status_rate_2",
+    "offset": 15,
+    "kind": "uint16",
+    "scale": 1.0
+   },
+   {
+    "name": "can_status_msgs_r1",
+    "offset": 17,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "can_status_msgs_r2",
+    "offset": 18,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "can_baud_rate",
+    "offset": 19,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "pairing_done",
+    "offset": 20,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "permanent_uart_enabled",
+    "offset": 21,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "shutdown_mode",
+    "offset": 22,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "can_mode",
+    "offset": 23,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "uavcan_esc_index",
+    "offset": 24,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "uavcan_raw_mode",
+    "offset": 25,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "uavcan_raw_rpm_max",
+    "offset": 26,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "uavcan_status_current_mode",
+    "offset": 30,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "servo_out_enable",
+    "offset": 31,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "kill_sw_mode",
+    "offset": 32,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_to_use",
+    "offset": 33,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.ctrl_type",
+    "offset": 34,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.pid_max_erpm",
+    "offset": 35,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.hyst",
+    "offset": 39,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.pulse_start",
+    "offset": 43,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.pulse_end",
+    "offset": 47,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.pulse_center",
+    "offset": 51,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.median_filter",
+    "offset": 55,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.safe_start",
+    "offset": 56,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.throttle_exp",
+    "offset": 57,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.throttle_exp_brake",
+    "offset": 61,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.throttle_exp_mode",
+    "offset": 65,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.ramp_time_pos",
+    "offset": 66,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.ramp_time_neg",
+    "offset": 70,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.multi_esc",
+    "offset": 74,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.tc",
+    "offset": 75,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.tc_max_diff",
+    "offset": 76,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.max_erpm_for_dir",
+    "offset": 80,
+    "kind": "float16",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.smart_rev_max_duty",
+    "offset": 82,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_ppm_conf.smart_rev_ramp_time",
+    "offset": 86,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.ctrl_type",
+    "offset": 90,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.hyst",
+    "offset": 91,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.voltage_start",
+    "offset": 95,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "app_adc_conf.voltage_end",
+    "offset": 97,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "app_adc_conf.voltage_min",
+    "offset": 99,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "app_adc_conf.voltage_max",
+    "offset": 101,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "app_adc_conf.voltage_center",
+    "offset": 103,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "app_adc_conf.voltage2_start",
+    "offset": 105,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "app_adc_conf.voltage2_end",
+    "offset": 107,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "app_adc_conf.use_filter",
+    "offset": 109,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.safe_start",
+    "offset": 110,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.buttons",
+    "offset": 111,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.voltage_inverted",
+    "offset": 112,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.voltage2_inverted",
+    "offset": 113,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.throttle_exp",
+    "offset": 114,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.throttle_exp_brake",
+    "offset": 118,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.throttle_exp_mode",
+    "offset": 122,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.ramp_time_pos",
+    "offset": 123,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.ramp_time_neg",
+    "offset": 127,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.multi_esc",
+    "offset": 131,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.tc",
+    "offset": 132,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.tc_max_diff",
+    "offset": 133,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_adc_conf.update_rate_hz",
+    "offset": 137,
+    "kind": "uint16",
+    "scale": 1.0
+   },
+   {
+    "name": "app_uart_baudrate",
+    "offset": 139,
+    "kind": "uint32",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.ctrl_type",
+    "offset": 143,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.hyst",
+    "offset": 144,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.ramp_time_pos",
+    "offset": 148,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.ramp_time_neg",
+    "offset": 152,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.stick_erpm_per_s_in_cc",
+    "offset": 156,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.throttle_exp",
+    "offset": 160,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.throttle_exp_brake",
+    "offset": 164,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.throttle_exp_mode",
+    "offset": 168,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.multi_esc",
+    "offset": 169,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.tc",
+    "offset": 170,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.tc_max_diff",
+    "offset": 171,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.use_smart_rev",
+    "offset": 175,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.smart_rev_max_duty",
+    "offset": 176,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_chuk_conf.smart_rev_ramp_time",
+    "offset": 180,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.speed",
+    "offset": 184,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.power",
+    "offset": 185,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.crc_type",
+    "offset": 186,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.retry_delay",
+    "offset": 187,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.retries",
+    "offset": 188,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.channel",
+    "offset": 189,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.address[0]",
+    "offset": 190,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.address[1]",
+    "offset": 191,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.address[2]",
+    "offset": 192,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_nrf_conf.send_crc_ack",
+    "offset": 193,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_pas_conf.ctrl_type",
+    "offset": 194,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_pas_conf.sensor_type",
+    "offset": 195,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_pas_conf.current_scaling",
+    "offset": 196,
+    "kind": "float16",
+    "scale": 1000.0
+   },
+   {
+    "name": "app_pas_conf.pedal_rpm_start",
+    "offset": 198,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "app_pas_conf.pedal_rpm_end",
+    "offset": 200,
+    "kind": "float16",
+    "scale": 10.0
+   },
+   {
+    "name": "app_pas_conf.invert_pedal_direction",
+    "offset": 202,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_pas_conf.magnets",
+    "offset": 203,
+    "kind": "uint16",
+    "scale": 1.0
+   },
+   {
+    "name": "app_pas_conf.use_filter",
+    "offset": 205,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "app_pas_conf.ramp_time_pos",
+    "offset": 206,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "app_pas_conf.ramp_time_neg",
+    "offset": 208,
+    "kind": "float16",
+    "scale": 100.0
+   },
+   {
+    "name": "app_pas_conf.update_rate_hz",
+    "offset": 210,
+    "kind": "uint16",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.type",
+    "offset": 212,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.mode",
+    "offset": 213,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.filter",
+    "offset": 214,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.accel_lowpass_filter_x",
+    "offset": 215,
+    "kind": "float16",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.accel_lowpass_filter_y",
+    "offset": 217,
+    "kind": "float16",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.accel_lowpass_filter_z",
+    "offset": 219,
+    "kind": "float16",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.gyro_lowpass_filter",
+    "offset": 221,
+    "kind": "float16",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.sample_rate_hz",
+    "offset": 223,
+    "kind": "uint16",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.use_magnetometer",
+    "offset": 225,
+    "kind": "u8",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.accel_confidence_decay",
+    "offset": 226,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.mahony_kp",
+    "offset": 230,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.mahony_ki",
+    "offset": 234,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.madgwick_beta",
+    "offset": 238,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.rot_roll",
+    "offset": 242,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.rot_pitch",
+    "offset": 246,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.rot_yaw",
+    "offset": 250,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.accel_offsets[0]",
+    "offset": 254,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.accel_offsets[1]",
+    "offset": 258,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.accel_offsets[2]",
+    "offset": 262,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.gyro_offsets[0]",
+    "offset": 266,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.gyro_offsets[1]",
+    "offset": 270,
+    "kind": "float32_auto",
+    "scale": 1.0
+   },
+   {
+    "name": "imu_conf.gyro_offsets[2]",
+    "offset": 274,
+    "kind": "float32_auto",
+    "scale": 1.0
+   }
+  ]
+ }
+}
