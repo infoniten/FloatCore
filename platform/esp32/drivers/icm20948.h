@@ -88,6 +88,33 @@ esp_err_t icm20948_read(icm20948_sample_t *out);
 icm20948_stats_t icm20948_stats(void);
 const icm20948_config_t *icm20948_active_config(void);
 
+// Состояние шины и восстановления (ТЗ v0.9D §2).
+//
+// Всё это драйвер и раньше ЗНАЛ: bus_recover() читает уровень SDA в цикле,
+// то есть видит и залипание, и отпустил ли ведомый линию за девять тактов;
+// icm20948_init() возвращает код ошибки. Просто ничего из этого наружу не
+// отдавалось, и политика здоровья получала на входе константные нули.
+//
+// Подставлять false там, где состояние реально известно, — худший вид
+// заглушки: проверка выглядит выполненной, а на деле выключена.
+typedef struct {
+    uint32_t recovery_attempts;   // сколько раз запускалась процедура
+    uint32_t recovery_failures;   // из них: SDA так и не отпущена
+    uint32_t sda_stuck_events;    // SDA удерживалась в нуле на входе
+    uint32_t scl_stuck_events;    // SCL удерживалась в нуле: тактировать нечем
+    uint32_t last_recovery_clocks; // сколько тактов понадобилось
+    uint32_t reinit_attempts;
+    uint32_t reinit_failures;
+    esp_err_t last_reinit_error;
+    bool bus_stuck;      // последняя попытка восстановления не удалась
+    bool reinit_failed;  // последняя переинициализация не удалась
+} icm20948_bus_status_t;
+
+icm20948_bus_status_t icm20948_bus_status(void);
+
+/** Отметить попытку переинициализации и её исход. Зовёт задача чтения. */
+void icm20948_note_reinit(esp_err_t result);
+
 /** Последний выполненный шаг icm20948_init() — чтобы отказ был адресным. */
 const char *icm20948_last_stage(void);
 

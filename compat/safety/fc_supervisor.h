@@ -208,6 +208,9 @@ void fc_supervisor_report_imu_permit(FcImuPermit permit, uint32_t reasons, uint3
 
 const char *fc_imu_fault_cause_name(FcImuFaultCause c);
 
+/** Последний вердикт политики IMU. Дёшево: для пути контура 500 Гц. */
+FcImuPermit fc_supervisor_last_imu_permit(void);
+
 FcSupervisorStatus fc_supervisor_status(void);
 FcSupervisorState fc_supervisor_state(void);
 

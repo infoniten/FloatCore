@@ -238,6 +238,23 @@ static esp_err_t select_bank_retry(uint8_t bank) {
 //
 // Лечение стандартное: вручную выдать до девяти тактов SCL, чтобы ведомый
 // дотолкал свой байт и отпустил SDA, затем сформировать условие STOP.
+static icm20948_bus_status_t BUS;
+
+icm20948_bus_status_t icm20948_bus_status(void) {
+    return BUS;
+}
+
+void icm20948_note_reinit(esp_err_t result) {
+    ++BUS.reinit_attempts;
+    BUS.last_reinit_error = result;
+    if (result != ESP_OK) {
+        ++BUS.reinit_failures;
+        BUS.reinit_failed = true;
+    } else {
+        BUS.reinit_failed = false;
+    }
+}
+
 static void bus_recover(int sda, int scl) {
     gpio_config_t io = {
         .pin_bit_mask = (1ULL << sda) | (1ULL << scl),
@@ -249,11 +266,35 @@ static void bus_recover(int sda, int scl) {
     gpio_set_level(scl, 1);
     esp_rom_delay_us(10);
 
+    ++BUS.recovery_attempts;
+
+    // Залипание SCL лечению тактами не поддаётся по построению: тактировать
+    // нечем. Это отдельное состояние, а не разновидность залипания SDA.
+    if (gpio_get_level(scl) == 0) {
+        ++BUS.scl_stuck_events;
+    }
+    if (gpio_get_level(sda) == 0) {
+        ++BUS.sda_stuck_events;
+    }
+
+    int clocks = 0;
     for (int i = 0; i < 9 && gpio_get_level(sda) == 0; ++i) {
         gpio_set_level(scl, 0);
         esp_rom_delay_us(5);
         gpio_set_level(scl, 1);
         esp_rom_delay_us(5);
+        ++clocks;
+    }
+    BUS.last_recovery_clocks = (uint32_t) clocks;
+
+    // Девять тактов исчерпаны, а линия всё ещё в нуле — ведомый её не
+    // отпустил. Дальше ждать нечего: это неустранимый отказ, и политика
+    // обязана узнать о нём как о таковом, а не через протухание.
+    if (gpio_get_level(sda) == 0) {
+        ++BUS.recovery_failures;
+        BUS.bus_stuck = true;
+    } else {
+        BUS.bus_stuck = false;
     }
 
     // STOP: SDA переходит из 0 в 1 при высоком SCL.

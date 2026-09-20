@@ -33,6 +33,7 @@
 #include "fc_log_port.h"
 #include "fc_motor_experiment.h"
 #include "../../../compat/diag/fc_gap_trace.h"
+#include "../../../compat/diag/fc_shadow.h"
 #include "../../../compat/motor/fc_dual_motor.h"
 #include "../../../compat/safety/fc_imu_policy.h"
 #include "fc_sched.h"
@@ -1165,6 +1166,7 @@ static void cmd_help(void) {
 #endif
     printf("зазоры IMU:              gaps [порог_мкс] | gaps-reset | imu-stall-confirm <мс>\n");
     printf("политика IMU:            imu-policy | imu-accel-low-confirm <N>\n");
+    printf("теневая команда:         shadow | shadow-tail [N] | shadow-reset\n");
 #if FC_MOTOR_BACKEND_AVAILABLE
     printf("МОТОРНЫЙ СТЕНД (колесо вывешено!):\n");
     printf("                         motor-status | motor-arm | motor-disarm\n");
@@ -1397,6 +1399,73 @@ static void cmd_imu_policy(void) {
 }
 #endif
 
+
+// ------------------------------------------- теневая команда Refloat (v0.9D)
+
+static void cmd_shadow(void) {
+    FcShadowStats s = fc_shadow_stats();
+    if (s.samples == 0) {
+        printf("теневых записей нет: Refloat ещё не просил тока\n");
+        return;
+    }
+    double n = (double) s.samples;
+    printf("теневая команда Refloat (НЕ передаётся мотору)\n");
+    printf("  записей         %llu, потеряно в кольце %llu\n",
+           (unsigned long long) s.samples, (unsigned long long) s.dropped);
+    printf("  мёртвая зона    <%.2f А: %llu (%.1f %%)\n", (double) FC_SHADOW_DEADZONE_LOW_A,
+           (unsigned long long) s.below_low, 100.0 * (double) s.below_low / n);
+    printf("                  %.2f-%.2f А: %llu (%.1f %%)\n",
+           (double) FC_SHADOW_DEADZONE_LOW_A, (double) FC_SHADOW_DEADZONE_HIGH_A,
+           (unsigned long long) s.in_band, 100.0 * (double) s.in_band / n);
+    printf("                  >%.2f А: %llu (%.1f %%)\n", (double) FC_SHADOW_DEADZONE_HIGH_A,
+           (unsigned long long) s.above_high, 100.0 * (double) s.above_high / n);
+    printf("  пики            +%.3f А, %.3f А\n", (double) s.peak_positive,
+           (double) s.peak_negative);
+    printf("  интеграл        последний %.4f, пик по модулю %.4f\n",
+           (double) s.last_i_term, (double) s.peak_abs_i_term);
+    printf("  в мёртвой зоне  входов %llu, наибольший прирост интеграла %.4f\n",
+           (unsigned long long) s.deadzone_entries, (double) s.max_i_growth_in_deadzone);
+    printf("  переходов через ноль %llu, в насыщении %llu (%.1f %%)\n",
+           (unsigned long long) s.zero_crossings, (unsigned long long) s.saturation_samples,
+           100.0 * (double) s.saturation_samples / n);
+    printf("  разрешено к передаче %llu — источник Refloat в маску гейта не входит\n",
+           (unsigned long long) s.deliverable_samples);
+    if (s.have_pitch) {
+        printf("  крайние углы    %.2f° → %.3f А;  %.2f° → %.3f А\n", (double) s.min_pitch,
+               (double) s.current_at_min_pitch, (double) s.max_pitch,
+               (double) s.current_at_max_pitch);
+    }
+    printf("  история         прорежена 1:%u, глубина %.1f с\n",
+           (unsigned) FC_SHADOW_DECIMATION,
+           (double) FC_SHADOW_RING * (double) FC_SHADOW_DECIMATION / 500.0);
+}
+
+static void cmd_shadow_tail(const char *arg) {
+    uint32_t want = arg && *arg ? (uint32_t) strtoul(arg, NULL, 10) : 12;
+    if (want > 64) {
+        want = 64;
+    }
+    // Статический, а не на стеке: у консольной задачи его 4 КБ, а 64 записи
+    // это около трёх. Ровно на этом я уронил плату (LoadProhibited), увеличив
+    // буфер с 40 до 64 и не посмотрев на стек. Задача одна, гонки нет.
+    static FcShadowSample buf[64];
+    uint32_t n = fc_shadow_tail(buf, want);
+    printf("последние %" PRIu32 " записей (свежие сверху)\n", n);
+    printf("  %10s %8s %8s %9s %8s %8s %8s %4s\n", "мкс", "ток,А", "pitch", "rate", "setp",
+           "P", "I", "sat");
+    for (uint32_t i = 0; i < n; ++i) {
+        printf("  %10llu %8.3f %8.2f %9.2f %8.2f %8.3f %8.4f %4u\n",
+               (unsigned long long) buf[i].timestamp_us, (double) buf[i].current,
+               (double) buf[i].pitch, (double) buf[i].pitch_rate, (double) buf[i].setpoint,
+               (double) buf[i].pid_p, (double) buf[i].pid_i, (unsigned) buf[i].sat);
+    }
+}
+
+static void cmd_shadow_reset(void) {
+    fc_shadow_reset();
+    printf("теневая статистика обнулена\n");
+}
+
 static void dispatch(const char *line) {
     if (!strcmp(line, "status")) {
         cmd_status();
@@ -1507,6 +1576,12 @@ static void dispatch(const char *line) {
         cmd_gaps(line[4] == ' ' ? line + 5 : NULL);
     } else if (!strcmp(line, "gaps-reset")) {
         cmd_gaps_reset();
+    } else if (!strcmp(line, "shadow")) {
+        cmd_shadow();
+    } else if (!strcmp(line, "shadow-reset")) {
+        cmd_shadow_reset();
+    } else if (!strncmp(line, "shadow-tail", 11) && (line[11] == 0 || line[11] == ' ')) {
+        cmd_shadow_tail(line[11] == ' ' ? line + 12 : NULL);
 #if FC_LAB_DIAGNOSTICS
     } else if (!strcmp(line, "imu-policy")) {
         cmd_imu_policy();

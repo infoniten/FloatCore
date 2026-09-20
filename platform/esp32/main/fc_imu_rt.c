@@ -251,7 +251,11 @@ static void imu_rt_task(void *arg) {
                 FC_LOGW(TAG, "серия отказов чтения — переинициализация датчика (#%llu)",
                         (unsigned long long) R.reinits);
                 icm20948_config_t cfg = R.cfg;
-                icm20948_init(&cfg);
+                // Код возврата больше НЕ отбрасывается. Неудачная
+                // переинициализация — неустранимый отказ, и политика обязана
+                // узнать о нём как о таковом, а не вывести из протухания
+                // (ТЗ v0.9D §3).
+                icm20948_note_reinit(icm20948_init(&cfg));
                 esp_task_wdt_reset();
                 next = xTaskGetTickCount();
             }

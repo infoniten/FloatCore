@@ -26,6 +26,7 @@ static struct {
     uint32_t imu_worst_age_us;
     FcSupervisorImuTime imu_time;
     FcImuFaultSnapshot imu_fault;
+    FcImuPermit last_imu_permit;
     FcSupervisorInputs in;
     bool loop_tick_seen;
     bool imu_sample_seen;
@@ -158,6 +159,7 @@ void fc_supervisor_report_imu_permit(FcImuPermit permit, uint32_t reasons, uint3
     // OK — ориентации можно доверять. HOLD и LOST одинаково снимают вход
     // imu_healthy, но расходятся в главном: HOLD не защёлкивает ничего и
     // проходит сам, когда семпл снова станет свежим.
+    S.last_imu_permit = permit;
     S.in.imu_healthy = (permit == FC_IMU_PERMIT_OK);
 
     if (permit != FC_IMU_PERMIT_LOST) {
@@ -178,6 +180,10 @@ void fc_supervisor_report_imu_permit(FcImuPermit permit, uint32_t reasons, uint3
 
 void fc_supervisor_report_imu_healthy(bool healthy, uint64_t now_us) {
     fc_supervisor_report_imu(healthy, 0, NULL, now_us);
+}
+
+FcImuPermit fc_supervisor_last_imu_permit(void) {
+    return S.last_imu_permit;
 }
 
 const char *fc_imu_fault_cause_name(FcImuFaultCause c) {

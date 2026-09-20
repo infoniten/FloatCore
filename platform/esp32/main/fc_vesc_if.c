@@ -12,6 +12,8 @@
 #include "../../../compat/config/floatcore_limits.h"
 #include "fc_log_port.h"
 #include "fc_platform.h"
+#include "../../../compat/diag/fc_shadow.h"
+#include "../../../compat/refloat_glue/refloat_facade.h"
 
 #include "../../../compat/safety/fc_motor_gate.h"
 #include "../../../compat/safety/fc_supervisor.h"
@@ -442,7 +444,41 @@ static void gate(FcMotorRequestKind kind, float value) {
     fc_motor_gate_request(kind, value, (uint64_t) esp_timer_get_time());
 }
 
+// Теневое наблюдение (ТЗ v0.9D §6). Стоит ДО гейта намеренно: команду надо
+// видеть там, где она рождается, а не там, где решается её судьба. Ослаблять
+// Motor Gate ради наблюдения означало бы сломать ровно тот барьер, ради
+// которого всё строилось, — и ТЗ называет это признаком неверной архитектуры.
+//
+// Наблюдатель никуда не передаёт: он умеет только писать в кольцо. Путь
+// отсюда к транспорту не существует как код.
+static void shadow_observe(float current) {
+    RefloatShadowFields rf;
+    refloat_facade_shadow(&rf);
+
+    FcShadowSample s;
+    memset(&s, 0, sizeof s);
+    s.timestamp_us = fc_uptime_us();
+    s.current = current;
+    s.pitch = rf.pitch;
+    s.roll = rf.roll;
+    s.pitch_rate = rf.pitch_rate;
+    s.setpoint = rf.setpoint;
+    s.pid_p = rf.pid_p;
+    s.pid_i = rf.pid_i;
+    s.pid_rate_p = rf.pid_rate_p;
+    s.sat = (uint8_t) rf.sat;
+    s.refloat_state = (uint8_t) rf.state;
+    s.supervisor_state = (uint8_t) fc_supervisor_state();
+    s.imu_permit = (uint8_t) fc_supervisor_last_imu_permit();
+    // Вычисляется, а не утверждается: источник Refloat в маску допущенных
+    // не входит, поэтому здесь закономерно false — но видно, что это
+    // следствие настройки гейта, а не константа в наблюдателе.
+    s.deliverable = (fc_motor_gate_allowed_origins() & (1u << FC_MOTOR_ORIGIN_REFLOAT)) != 0;
+    fc_shadow_record(&s);
+}
+
 static void if_mc_set_current(float current) {
+    shadow_observe(current);
     gate(FC_MOTOR_REQ_CURRENT, current);
 }
 

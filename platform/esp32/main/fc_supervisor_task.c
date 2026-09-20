@@ -12,6 +12,7 @@
 #include "fc_gap_port.h"
 #include "../../../compat/imu/fc_imu_pipeline.h"
 #include "../../../compat/safety/fc_imu_policy.h"
+#include "../drivers/icm20948.h"
 #include "fc_platform.h"
 
 #include "../../../compat/safety/fc_imu_health.h"
@@ -74,6 +75,7 @@ static void supervisor_task(void *arg) {
             // того, есть ли прямо сейчас свежая и достоверная ориентация
             // (docs/imu_health_policy.md).
             FcImuHealthStatus hst = fc_imu_health_status();
+            icm20948_bus_status_t bus = icm20948_bus_status();
             FcImuPolicyConfig pc = fc_imu_policy_default_config();
             FcImuPolicyInputs pin = {
                 .now_us = now,
@@ -82,12 +84,14 @@ static void supervisor_task(void *arg) {
                 .consecutive_read_failures = hst.consecutive_read_errors,
                 .consecutive_invalid = hst.consecutive_invalid,
                 .consecutive_accel_low = hst.consecutive_accel_low,
-                // Залипание шины и неудачу переинициализации платформа пока
-                // не сообщает. Подставлять сюда false — значит утверждать,
-                // что их не бывает; поэтому они остаются явными нулями с
-                // этим комментарием, а не молчаливым умолчанием.
-                .bus_stuck = false,
-                .reinit_failed = false,
+                // Оба сигнала приходят от драйвера, а не подставляются.
+                // bus_stuck означает, что девять тактов восстановления
+                // исчерпаны, а ведомый всё ещё держит SDA; reinit_failed —
+                // что переинициализация вернула ошибку. Ни то, ни другое не
+                // выводится из протухания: протухание восстановимо, а это —
+                // нет (ТЗ v0.9D §3).
+                .bus_stuck = bus.bus_stuck,
+                .reinit_failed = bus.reinit_failed,
             };
             uint32_t reasons = 0;
             FcImuPermit permit = fc_imu_policy_evaluate(&pc, &pin, &reasons);

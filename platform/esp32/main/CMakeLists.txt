@@ -43,6 +43,7 @@ idf_component_register(
         "../../../compat/can/fc_vesc_can_motor.c"
         "../../../compat/motor/fc_dual_motor.c"
         "../../../compat/diag/fc_gap_trace.c"
+        "../../../compat/diag/fc_shadow.c"
         "../../../compat/vesc_protocol/packet.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS

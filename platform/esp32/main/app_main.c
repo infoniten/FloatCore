@@ -19,6 +19,7 @@
 #include "fc_log_port.h"
 #include "fc_motor_experiment.h"
 #include "../../../compat/diag/fc_gap_trace.h"
+#include "../../../compat/diag/fc_shadow.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
 #include "../../../compat/safety/fc_build_profile.h"
 #include "../../../compat/safety/fc_imu_health.h"
@@ -262,6 +263,7 @@ void app_main(void) {
     // длинный зазор должен быть пойман, а не пропущен из-за порядка запуска
     // (ТЗ v0.9A §3 — трассировка обязана существовать до моторных команд).
     fc_gap_trace_init(FC_GAP_TRACE_DEFAULT_THRESHOLD_US);
+    fc_shadow_init();
 
     // 0. Журнал — раньше всего остального. С этого момента realtime-пути
     //    (контур IMU, refloat_thd, драйвер датчика, VESC_IF->printf) кладут

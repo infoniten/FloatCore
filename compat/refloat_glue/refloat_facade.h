@@ -43,6 +43,26 @@ void refloat_facade_stop(void);
 
 RefloatSnapshot refloat_facade_snapshot(void);
 
+// Лёгкий срез состояния для теневого наблюдателя (ТЗ v0.9D §7).
+//
+// Отдельно от RefloatSnapshot намеренно: тот копирует три десятка полей и
+// читается человеком по запросу, а это снимается 500 раз в секунду из пути
+// контура. Копировать туда лишнее — значит тратить время контура на то, что
+// никто не читает.
+//
+// Составляющие ПИД берутся из pid.h (поля p, i, rate_p). Upstream ради этого
+// НЕ менялся: структура уже публична, просто до неё не доходили.
+typedef struct {
+    float pitch, roll, pitch_rate;
+    float setpoint;
+    float balance_current;
+    float pid_p, pid_i, pid_rate_p;
+    int sat;
+    int state;
+} RefloatShadowFields;
+
+void refloat_facade_shadow(RefloatShadowFields *out);
+
 const char *refloat_facade_state_name(int state);
 const char *refloat_facade_stop_name(int stop_condition);
 const char *refloat_facade_footpad_name(int fs);

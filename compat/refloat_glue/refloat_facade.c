@@ -32,6 +32,28 @@ void refloat_facade_stop(void) {
     }
 }
 
+void refloat_facade_shadow(RefloatShadowFields *out) {
+    if (!out) {
+        return;
+    }
+    if (!started) {
+        RefloatShadowFields z = {0};
+        *out = z;
+        return;
+    }
+    const Data *d = (const Data *) info.arg;
+    out->pitch = d->imu.pitch;
+    out->roll = d->imu.roll;
+    out->pitch_rate = d->imu.pitch_rate;
+    out->setpoint = d->setpoint;
+    out->balance_current = d->balance_current.value;
+    out->pid_p = d->pid.p;
+    out->pid_i = d->pid.i;
+    out->pid_rate_p = d->pid.rate_p;
+    out->sat = (int) d->state.sat;
+    out->state = (int) d->state.state;
+}
+
 RefloatSnapshot refloat_facade_snapshot(void) {
     RefloatSnapshot s = {0};
     if (!started) {
