@@ -198,7 +198,9 @@ static void imu_rt_task(void *arg) {
 
         int64_t t0 = esp_timer_get_time();
         icm20948_sample_t s;
+        fc_timing_exec_begin(FC_TIMING_IMU_I2C);
         esp_err_t err = icm20948_read(&s);
+        fc_timing_exec_end(FC_TIMING_IMU_I2C);
         int64_t t1 = esp_timer_get_time();
         uint32_t dur = (uint32_t) (t1 - t0);
         if (dur > R.max_read_us) {
@@ -206,6 +208,10 @@ static void imu_rt_task(void *arg) {
         }
         ++R.iterations;
         fc_timing_tick(FC_TIMING_IMU_READ);
+        // Исполнение этой задачи раньше не мерилось вовсе: был только период.
+        // А через неё идёт вся цепочка датчик -> Refloat, и её время — самая
+        // крупная неучтённая статья бюджета ядра (ТЗ v0.9H §8).
+        fc_timing_exec_begin(FC_TIMING_IMU_READ);
 
         // Параметры AHRS берутся из того же хранилища, что читает Refloat, и
         // применяются при изменении: он перезаписывает их при инициализации
@@ -310,6 +316,12 @@ static void imu_rt_task(void *arg) {
                     (long) (ps.residual_bias_dps[2] * 1000.0f));
         }
 
+        // Измерение чтения закрывается ЗДЕСЬ, до колбэка. Канал control
+        // меряется внутри этой же задачи, вокруг вызова Refloat: если бы
+        // измерения вложились друг в друга, одно и то же время попало бы в
+        // бюджет ядра дважды (ТЗ v0.9H §8, §9).
+        fc_timing_exec_end(FC_TIMING_IMU_READ);
+
         void (*cb)(float *, float *, float *, float) = R.callback;
         if (cb && R.startup_done) {
             fc_timing_exec_begin(FC_TIMING_CONTROL);
@@ -381,8 +393,15 @@ bool fc_imu_rt_start(void) {
     fc_timing_set_nominal(FC_TIMING_CONTROL, nominal_us);
     fc_timing_set_nominal(FC_TIMING_IMU_READ, nominal_us);
 
+    // Номинал нужен каналу не как дедлайн, а как масштаб гистограммы: без
+    // него ширина корзины выходит 1 мкс, диапазон — 200 мкс, и все отсчёты
+    // уходят в переполнение, отчего перцентиль показывал UINT32_MAX.
+    // Транзакция выполняется ровно раз за итерацию, поэтому масштаб тот же.
+    fc_timing_set_nominal(FC_TIMING_IMU_I2C, nominal_us);
+
     xTaskCreatePinnedToCore(
-        imu_rt_task, "fc_imu_rt", 5120, NULL, FC_PRIO_IMU, &R.task, FC_CORE_REALTIME
+        imu_rt_task, "fc_imu_rt", FC_IMU_RT_STACK_BYTES, NULL, FC_PRIO_IMU, &R.task,
+        FC_CORE_REALTIME
     );
     return R.driver_ok;
 }

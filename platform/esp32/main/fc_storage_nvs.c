@@ -115,6 +115,46 @@ bool fc_storage_write(uint32_t value, int address) {
     return true;
 }
 
+// Признак занятости и кольцо событий (ТЗ v0.9H §5). volatile потому, что
+// читается из ДРУГОЙ задачи и с другого ядра, пока эта стоит в записи.
+static volatile bool g_busy;
+static volatile uint64_t g_busy_since_us;
+
+static FcStorageEvent g_events[FC_STORAGE_EVENTS];
+static uint32_t g_event_head;
+static uint32_t g_event_count;
+
+static void event_push(uint64_t start_us, uint32_t dur_us, bool ok) {
+    g_events[g_event_head].start_us = start_us;
+    g_events[g_event_head].duration_us = dur_us;
+    g_events[g_event_head].ok = ok;
+    g_event_head = (g_event_head + 1u) % FC_STORAGE_EVENTS;
+    if (g_event_count < FC_STORAGE_EVENTS) {
+        ++g_event_count;
+    }
+}
+
+bool fc_storage_busy(uint64_t *since_us) {
+    bool b = g_busy;
+    if (since_us) {
+        *since_us = g_busy_since_us;
+    }
+    return b;
+}
+
+uint32_t fc_storage_events(FcStorageEvent *out, uint32_t max) {
+    if (!out || max == 0) {
+        return 0;
+    }
+    uint32_t n = g_event_count < max ? g_event_count : max;
+    // Отдаём от самого свежего к более старым: разбор идёт от провала назад.
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t idx = (g_event_head + FC_STORAGE_EVENTS - 1u - i) % FC_STORAGE_EVENTS;
+        out[i] = g_events[idx];
+    }
+    return n;
+}
+
 bool fc_storage_commit(void) {
     if (!g_st.ready) {
         return false;
@@ -125,11 +165,17 @@ bool fc_storage_commit(void) {
     // Длительность операции меряется всегда: именно она и есть та самая
     // остановка контура, ради которой введена политика записи (ТЗ §23).
     uint64_t t0 = fc_uptime_us();
+    // Признак ставится ДО обращения к носителю и снимается ПОСЛЕ: окно должно
+    // покрывать всё время, пока кэш может быть отключён (ТЗ v0.9H §5).
+    g_busy_since_us = t0;
+    g_busy = true;
     esp_err_t err = nvs_set_blob(g_st.handle, FC_STORAGE_KEY, g_st.words, sizeof(g_st.words));
     if (err == ESP_OK) {
         err = nvs_commit(g_st.handle);
     }
     uint32_t dur = (uint32_t) (fc_uptime_us() - t0);
+    g_busy = false;
+    event_push(t0, dur, err == ESP_OK);
     g_st.stats.last_commit_us = dur;
     g_st.stats.last_commit_at_us = fc_uptime_us();
     if (dur > g_st.stats.max_commit_us) {

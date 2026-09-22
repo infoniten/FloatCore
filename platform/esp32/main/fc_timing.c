@@ -54,6 +54,9 @@ static const char *const kNames[FC_TIMING_COUNT] = {
     [FC_TIMING_AUX] = "aux_thd",
     [FC_TIMING_IMU_READ] = "icm20948 read",
     [FC_TIMING_SUPERVISOR] = "fc_super",
+    [FC_TIMING_CAN_RX] = "fc_can_rx",
+    [FC_TIMING_LOG] = "fc_log",
+    [FC_TIMING_IMU_I2C] = "i2c транзакция",
 };
 
 uint64_t fc_uptime_us(void) {
@@ -202,7 +205,12 @@ void fc_timing_exec_end(FcTimingChannel ch) {
     if (net > c->s.net_max_us) {
         c->s.net_max_us = net;
     }
-    g_core_busy_us += dur;
+    // В накопитель занятости идёт СОБСТВЕННОЕ время, а не настенное.
+    // Настенное уже содержит чужую работу внутри себя, и складывая его, мы
+    // считали бы одну и ту же работу столько раз, сколько каналов её
+    // накрыли. Проявилось это тем, что «вытеснение» главного потока Refloat
+    // выходило больше его же настенного времени итерации.
+    g_core_busy_us += net;
 
     ++c->s.exec_samples;
     c->s.exec_sum_us += dur;

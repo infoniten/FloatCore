@@ -34,6 +34,10 @@ static void drain_task(void *arg) {
     for (;;) {
         FcLogEntry e;
         bool got;
+        // Печать в UART на 115200 бод стоит около 9 мс на сто символов, и это
+        // работа на ядре housekeeping. Раньше она не учитывалась нигде
+        // (ТЗ v0.9H §8): её стоимость молча попадала в чужие измерения.
+        fc_timing_exec_begin(FC_TIMING_LOG);
         do {
             xSemaphoreTake(L.mtx, portMAX_DELAY);
             got = fc_log_pop(&L.ring, &e);
@@ -44,6 +48,7 @@ static void drain_task(void *arg) {
                 ++L.printed;
             }
         } while (got);
+        fc_timing_exec_end(FC_TIMING_LOG);
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 }

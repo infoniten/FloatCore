@@ -45,6 +45,17 @@ typedef struct {
     // vTaskDelay квантуется тиком в 1 мс, а Refloat просит нецелое число
     // тиков (см. комментарий в if_sleep_us).
     esp_timer_handle_t waker;
+    // Трассировка вызовов VESC_IF (ТЗ v0.9H §10, §18).
+    //
+    // Зачем. Задача, застрявшая внутри вызова, снаружи выглядит одинаково:
+    // «состояние R, итераций нет». Сторожевой таймер печатает стек ТЕКУЩЕЙ
+    // задачи, а не голодающей, поэтому по нему место не найти. Здесь каждая
+    // функция интерфейса отмечает вход, и зависшая задача сама показывает,
+    // из какого вызова она не вернулась.
+    //
+    // Цена — две записи в память на вызов, без блокировок и без выделения.
+    const char *volatile stage;
+    volatile uint64_t stage_us;
     TickType_t last_wake;   // абсолютная отметка для периодического сна
     uint32_t period_ticks;  // период цикла потока, выведен из первого запроса
 } FcThread;
@@ -72,6 +83,10 @@ static struct {
     uint64_t log_lines;
 } S;
 
+// Определение ниже, у остальных функций интерфейса: здесь нужен только
+// прототип, потому что if_sleep_us объявлена раньше.
+static void mark(const char *what);
+
 // ------------------------------------------------------------------ время
 // SYSTEM_TICK_RATE_HZ = 10000 → один тик = 100 мкс.
 
@@ -87,6 +102,9 @@ static struct {
 void fc_sched_note_sleep(size_t idx, uint32_t requested_us, uint32_t actual_us);
 
 static void if_sleep_us(uint32_t us) {
+    // Метки по стадиям, а не одна на функцию: «застрял в if_sleep_us» не
+    // говорит, в чём именно (ТЗ v0.9H §18).
+    mark("sleep:enter");
     // Учёт периода главного потока: Refloat вызывает sleep_us ровно один раз
     // за итерацию refloat_thd (main.c:777) и aux_thd (main.c:1143).
     // Меряем здесь, чтобы не трогать upstream.
@@ -104,6 +122,7 @@ static void if_sleep_us(uint32_t us) {
         fc_timing_exec_end(ch);
         // Задача жива — гасим watchdog именно здесь: это единственная точка,
         // которую главный цикл проходит на каждой итерации (ТЗ §11).
+        mark("sleep:wdt_reset");
         esp_task_wdt_reset();
     }
 
@@ -177,7 +196,9 @@ static void if_sleep_us(uint32_t us) {
             }
         }
         uint64_t t_sleep0 = (uint64_t) esp_timer_get_time();
+        mark("sleep:delay_until");
         BaseType_t slept = xTaskDelayUntil(&t->last_wake, t->period_ticks);
+        mark("sleep:woke");
         uint32_t actual = (uint32_t) ((uint64_t) esp_timer_get_time() - t_sleep0);
         if (slept == pdFALSE) {
             // Дедлайн уже прошёл: задержки сна не было, задержку считать
@@ -189,6 +210,7 @@ static void if_sleep_us(uint32_t us) {
     } else {
         // Вызов не из задачи Refloat (например, из инициализации): точность
         // здесь не нужна, тика достаточно.
+        mark("sleep:vTaskDelay");
         vTaskDelay(pdMS_TO_TICKS((us + 999) / 1000));
     }
 
@@ -206,17 +228,21 @@ static void if_sleep_us(uint32_t us) {
         fc_timing_tick(ch);
         fc_timing_exec_begin(ch);
     }
+    mark("sleep:returned");
 }
 
 static void if_sleep_ms(uint32_t ms) {
+    mark("if_sleep_ms");
     if_sleep_us(ms * 1000);
 }
 
 static float if_system_time(void) {
+    mark("if_system_time");
     return (float) (esp_timer_get_time() * 1e-6);
 }
 
 static systime_t if_system_time_ticks(void) {
+    mark("if_system_time_ticks");
     return (systime_t) (esp_timer_get_time() / 100);
 }
 
@@ -254,16 +280,19 @@ void fc_vesc_if_refresh_limits(void) {
 }
 
 static uint32_t if_timer_time_now(void) {
+    mark("if_timer_time_now");
     return (uint32_t) esp_timer_get_time();
 }
 
 static float if_timer_seconds_elapsed_since(uint32_t t) {
+    mark("if_timer_seconds_elapsed_since");
     // Разностная арифметика в uint32: корректно переживает переполнение
     // раз в ~71 минуту (docs/vesc_if_contract.md §1).
     return (float) ((uint32_t) esp_timer_get_time() - t) * 1e-6f;
 }
 
 static float if_ts_to_age_s(systime_t ts) {
+    mark("if_ts_to_age_s");
     return (float) ((systime_t) (esp_timer_get_time() / 100) - ts) / (float) SYSTEM_TICK_RATE_HZ;
 }
 
@@ -309,6 +338,7 @@ static void thread_trampoline(void *arg) {
 }
 
 static lib_thread if_spawn(void (*fun)(void *), size_t stack, const char *name, void *arg) {
+    mark("if_spawn");
     if (S.thread_count >= FC_MAX_THREADS) {
         ESP_LOGE(TAG, "spawn(%s): превышен лимит задач", name ? name : "?");
         return NULL;
@@ -329,21 +359,42 @@ static lib_thread if_spawn(void (*fun)(void *), size_t stack, const char *name, 
     // Все задачи Refloat — на ядро 1. Это воспроизводит однопроцессорную
     // семантику STM32, на которую Refloat рассчитан (в нём нет ни одного
     // мьютекса; docs/threading_model.md §3).
+    // ПЕРВЫЙ поток Refloat — главный контур, он realtime и живёт на ядре 1.
+    // ОСТАЛЬНЫЕ — вспомогательные, и им там не место (ТЗ v0.9H §18).
+    //
+    // Почему это исправление, а не удобство. Измерено: в RUNNING ядро 1
+    // занято на 100.02 % задачами с приоритетом 12 и выше (fc_imu_rt 71.51 %,
+    // Refloat Main 26.78 %, fc_super 1.73 %), простой ядра — 0.00 %. Задача
+    // «Refloat Aux» с приоритетом 10 не получала процессор НИ РАЗУ: она
+    // застревала перед xTaskDelayUntil, не доходила до нашего сброса
+    // сторожевого таймера, и он срабатывал каждые пять секунд. Его обработчик
+    // печатает backtrace из аварийного контекста, и это давало провалы по
+    // 20 мс, «транзакции I²C» по 37 мс и пропущенные дедлайны — то есть всё,
+    // что на v0.9G выглядело как отказ реального времени.
+    //
+    // Сам Refloat считает этот поток неприоритетным: первым делом он зовёт
+    // thread_set_priority(-1) (main.c:1112). Ядро 0 при этом простаивает на
+    // 99.4 %. Держать неприоритетную задачу на перегруженном ядре, когда
+    // соседнее пусто, — дефект размещения, а не нехватка процессора.
+    //
+    // Watchdog при этом НЕ ослабляется: порог, подписка и поведение прежние.
+    // Меняется только то, на каком ядре задача исполняется.
+    const int core = (S.thread_count == 0) ? FC_CORE_REALTIME : FC_CORE_HOUSEKEEPING;
     BaseType_t ok = xTaskCreatePinnedToCore(
-        thread_trampoline, t->name, stack_bytes, t, FC_PRIO_REFLOAT, &t->handle,
-        FC_CORE_REALTIME
+        thread_trampoline, t->name, stack_bytes, t, FC_PRIO_REFLOAT, &t->handle, core
     );
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "spawn(%s): не удалось создать задачу", t->name);
         return NULL;
     }
     ESP_LOGI(TAG, "spawn: %s, стек %u Б (запрошено %u), ядро %d, приоритет %d",
-             t->name, (unsigned) stack_bytes, (unsigned) stack, FC_CORE_REALTIME, FC_PRIO_REFLOAT);
+             t->name, (unsigned) stack_bytes, (unsigned) stack, core, FC_PRIO_REFLOAT);
     ++S.thread_count;
     return (lib_thread) t;
 }
 
 static void if_request_terminate(lib_thread th) {
+    mark("if_request_terminate");
     FcThread *t = (FcThread *) th;
     if (!t) {
         return;
@@ -355,6 +406,7 @@ static void if_request_terminate(lib_thread th) {
 }
 
 static bool if_should_terminate(void) {
+    mark("if_should_terminate");
     TaskHandle_t self = xTaskGetCurrentTaskHandle();
     for (size_t i = 0; i < S.thread_count; ++i) {
         if (S.threads[i].handle == self) {
@@ -365,6 +417,7 @@ static bool if_should_terminate(void) {
 }
 
 static void if_thread_set_priority(int priority) {
+    mark("if_thread_set_priority");
     // Контракт VESC: -5…5, 0 — норма. aux_thd просит -1.
     if (priority < -5) {
         priority = -5;
@@ -393,7 +446,22 @@ void floatcore_set_arg_slot(void **slot) {
 
 // ------------------------------------------------------------------- прочее
 
+// Отметить вход в функцию интерфейса для текущего потока Refloat. Поток
+// ищется по описателю задачи: их всего два, поэтому перебор дешевле, чем
+// заводить ключ локального хранилища.
+static void mark(const char *what) {
+    TaskHandle_t self = xTaskGetCurrentTaskHandle();
+    for (size_t i = 0; i < S.thread_count; ++i) {
+        if (S.threads[i].handle == self) {
+            S.threads[i].stage = what;
+            S.threads[i].stage_us = fc_uptime_us();
+            return;
+        }
+    }
+}
+
 static int if_printf(const char *fmt, ...) {
+    mark("if_printf");
     char buf[256];
     va_list ap;
     va_start(ap, fmt);
@@ -413,73 +481,87 @@ static void *if_malloc(size_t n) {
 }
 
 static void if_free(void *p) {
+    mark("if_free");
     heap_caps_free(p);
 }
 
 // --------------------------------------------------------------------- IMU
 
 static bool if_imu_startup_done(void) {
+    mark("if_imu_startup_done");
     return fc_imu_startup_done();
 }
 
 static float if_imu_get_roll(void) {
+    mark("if_imu_get_roll");
     float v;
     fc_imu_get_state(&v, NULL, NULL, NULL, NULL, NULL);
     return v;
 }
 
 static float if_imu_get_pitch(void) {
+    mark("if_imu_get_pitch");
     float v;
     fc_imu_get_state(NULL, &v, NULL, NULL, NULL, NULL);
     return v;
 }
 
 static float if_imu_get_yaw(void) {
+    mark("if_imu_get_yaw");
     float v;
     fc_imu_get_state(NULL, NULL, &v, NULL, NULL, NULL);
     return v;
 }
 
 static void if_imu_get_gyro(float *g) {
+    mark("if_imu_get_gyro");
     fc_imu_get_state(NULL, NULL, NULL, NULL, g, NULL);
 }
 
 static void if_imu_get_accel(float *a) {
+    mark("if_imu_get_accel");
     fc_imu_get_state(NULL, NULL, NULL, a, NULL, NULL);
 }
 
 static void if_imu_get_quaternions(float *q) {
+    mark("if_imu_get_quaternions");
     fc_imu_get_state(NULL, NULL, NULL, NULL, NULL, q);
 }
 
 static void if_imu_set_read_callback(void (*cb)(float *, float *, float *, float)) {
+    mark("if_imu_set_read_callback");
     fc_imu_set_callback(cb);
 }
 
 // ---------------------------------------------------------------------- IO
 
 static float if_io_read_analog(VESC_PIN pin) {
+    mark("if_io_read_analog");
     return fc_adc_read((int) pin);
 }
 
 static bool if_io_set_mode(VESC_PIN pin, VESC_PIN_MODE mode) {
+    mark("if_io_set_mode");
     (void) pin;
     (void) mode;
     return false;  // GPIO платы на v0.5 не заводятся
 }
 
 static bool if_io_write(VESC_PIN pin, int state) {
+    mark("if_io_write");
     (void) pin;
     (void) state;
     return false;  // пищалка не подключена
 }
 
 static bool if_io_read(VESC_PIN pin) {
+    mark("if_io_read");
     (void) pin;
     return false;
 }
 
 static void if_set_pad_mode(void *gpio, uint32_t pin, uint32_t mode) {
+    mark("if_set_pad_mode");
     (void) gpio;
     (void) pin;
     (void) mode;
@@ -531,51 +613,63 @@ static void shadow_observe(float current) {
 }
 
 static void if_mc_set_current(float current) {
+    mark("if_mc_set_current");
     shadow_observe(current);
     gate(FC_MOTOR_REQ_CURRENT, current);
 }
 
 static void if_mc_set_brake_current(float current) {
+    mark("if_mc_set_brake_current");
     gate(FC_MOTOR_REQ_BRAKE_CURRENT, current);
 }
 
 static void if_mc_set_current_rel(float v) {
+    mark("if_mc_set_current_rel");
     gate(FC_MOTOR_REQ_CURRENT_REL, v);
 }
 
 static void if_mc_set_brake_current_rel(float v) {
+    mark("if_mc_set_brake_current_rel");
     gate(FC_MOTOR_REQ_BRAKE_CURRENT_REL, v);
 }
 
 static void if_mc_set_duty(float duty) {
+    mark("if_mc_set_duty");
     gate(FC_MOTOR_REQ_DUTY, duty);
 }
 
 static void if_mc_set_duty_noramp(float duty) {
+    mark("if_mc_set_duty_noramp");
     gate(FC_MOTOR_REQ_DUTY_NORAMP, duty);
 }
 
 static void if_mc_set_pid_speed(float rpm) {
+    mark("if_mc_set_pid_speed");
     gate(FC_MOTOR_REQ_PID_SPEED, rpm);
 }
 
 static void if_mc_set_pid_pos(float pos) {
+    mark("if_mc_set_pid_pos");
     gate(FC_MOTOR_REQ_PID_POS, pos);
 }
 
 static void if_mc_set_handbrake(float current) {
+    mark("if_mc_set_handbrake");
     gate(FC_MOTOR_REQ_HANDBRAKE, current);
 }
 
 static void if_mc_set_handbrake_rel(float v) {
+    mark("if_mc_set_handbrake_rel");
     gate(FC_MOTOR_REQ_HANDBRAKE_REL, v);
 }
 
 static void if_mc_release_motor(void) {
+    mark("if_mc_release_motor");
     gate(FC_MOTOR_REQ_RELEASE, 0.0f);
 }
 
 static bool if_foc_play_tone(int channel, float freq, float voltage) {
+    mark("if_foc_play_tone");
     // Звук на VESC издаётся подачей напряжения на обмотки, поэтому это тоже
     // выход на мотор и он идёт через ту же политику.
     (void) channel;
@@ -585,11 +679,13 @@ static bool if_foc_play_tone(int channel, float freq, float voltage) {
 }
 
 static void if_mc_set_current_off_delay(float d) {
+    mark("if_mc_set_current_off_delay");
     // Не выход: параметр следующей команды тока, которой не будет.
     (void) d;
 }
 
 static void if_timeout_reset(void) {
+    mark("if_timeout_reset");
     fc_motor_gate_keepalive();
 }
 
@@ -602,27 +698,33 @@ static void if_timeout_reset(void) {
 #define FC_STUB_TEMP 25.0f
 
 static float if_zero(void) {
+    mark("if_zero");
     return 0.0f;
 }
 
 static float if_zero_bool(bool reset) {
+    mark("if_zero_bool");
     (void) reset;
     return 0.0f;
 }
 
 static float if_stub_voltage(void) {
+    mark("if_stub_voltage");
     return FC_STUB_VOLTAGE;
 }
 
 static float if_stub_temp(void) {
+    mark("if_stub_temp");
     return FC_STUB_TEMP;
 }
 
 static uint64_t if_zero_u64(void) {
+    mark("if_zero_u64");
     return 0;
 }
 
 static mc_fault_code if_mc_get_fault(void) {
+    mark("if_mc_get_fault");
     return FAULT_CODE_NONE;
 }
 
@@ -631,6 +733,7 @@ static const char *if_mc_fault_to_string(mc_fault_code f) {
 }
 
 static float if_mc_get_battery_level(float *wh_left) {
+    mark("if_mc_get_battery_level");
     if (wh_left) {
         *wh_left = 0.0f;
     }
@@ -646,14 +749,17 @@ static volatile gnss_data *if_mc_gnss(void) {
 // ------------------------------------------------------------ конфигурация
 
 static float if_get_cfg_float(CFG_PARAM p) {
+    mark("if_get_cfg_float");
     return ((unsigned) p < 64) ? S.cfg_float[p] : 0.0f;
 }
 
 static int if_get_cfg_int(CFG_PARAM p) {
+    mark("if_get_cfg_int");
     return ((unsigned) p < 64) ? S.cfg_int[p] : 0;
 }
 
 static bool if_set_cfg_float(CFG_PARAM p, float v) {
+    mark("if_set_cfg_float");
     if ((unsigned) p >= 64) {
         return false;
     }
@@ -662,6 +768,7 @@ static bool if_set_cfg_float(CFG_PARAM p, float v) {
 }
 
 static bool if_set_cfg_int(CFG_PARAM p, int v) {
+    mark("if_set_cfg_int");
     if ((unsigned) p >= 64) {
         return false;
     }
@@ -673,6 +780,7 @@ static void if_conf_custom_add_config(
     int (*get_cfg)(uint8_t *data, bool is_default), bool (*set_cfg)(uint8_t *data),
     int (*get_cfg_xml)(uint8_t **data)
 ) {
+    mark("if_conf_custom_add_config");
     S.cfg_get = get_cfg;
     S.cfg_set = set_cfg;
     S.cfg_get_xml = get_cfg_xml;
@@ -681,6 +789,7 @@ static void if_conf_custom_add_config(
 }
 
 static void if_conf_custom_clear_configs(void) {
+    mark("if_conf_custom_clear_configs");
     S.cfg_get = NULL;
     S.cfg_set = NULL;
     S.cfg_get_xml = NULL;
@@ -697,6 +806,7 @@ int fc_config_read(uint8_t *data, bool is_default) {
 // ---------------------------------------------------------------- хранилище
 
 static bool if_read_eeprom_var(eeprom_var *v, int address) {
+    mark("if_read_eeprom_var");
     uint32_t w = 0;
     if (!fc_storage_read(&w, address)) {
         return false;
@@ -706,6 +816,7 @@ static bool if_read_eeprom_var(eeprom_var *v, int address) {
 }
 
 static bool if_store_eeprom_var(eeprom_var *v, int address) {
+    mark("if_store_eeprom_var");
     // Политика записи проверяется здесь, до всякого обращения к носителю
     // (ТЗ v0.6A §24). Refloat получает честный false и печатает свою ошибку.
     if (!fc_supervisor_config_write_allowed()) {
@@ -716,6 +827,7 @@ static bool if_store_eeprom_var(eeprom_var *v, int address) {
 }
 
 static bool if_store_backup_data(void) {
+    mark("if_store_backup_data");
     if (!fc_supervisor_config_write_allowed()) {
         fc_storage_note_rejected_write();
         return false;
@@ -726,23 +838,27 @@ static bool if_store_backup_data(void) {
 // ---------------------------------------------------------------- обмен с UI
 
 static void if_send_app_data(unsigned char *data, unsigned int len) {
+    mark("if_send_app_data");
     (void) data;
     (void) len;
     // Транспорт VESC Tool на ESP32 — следующий этап (ТЗ §18).
 }
 
 static bool if_set_app_data_handler(void (*func)(unsigned char *data, unsigned int len)) {
+    mark("if_set_app_data_handler");
     S.app_data_handler = func;
     return true;
 }
 
 static bool if_app_is_output_disabled(void) {
+    mark("if_app_is_output_disabled");
     return false;
 }
 
 // ------------------------------------------------------------------- пульт
 
 static remote_state if_get_remote_state(void) {
+    mark("if_get_remote_state");
     remote_state r;
     memset(&r, 0, sizeof(r));
     return r;
@@ -751,35 +867,42 @@ static remote_state if_get_remote_state(void) {
 // --------------------------------------------------------------------- LBM
 
 static bool if_lbm_add_extension(char *name, extension_fptr f) {
+    mark("if_lbm_add_extension");
     (void) name;
     (void) f;
     return true;
 }
 
 static float if_lbm_dec_as_float(lbm_value v) {
+    mark("if_lbm_dec_as_float");
     float f;
     memcpy(&f, &v, sizeof(f));
     return f;
 }
 
 static int32_t if_lbm_dec_as_i32(lbm_value v) {
+    mark("if_lbm_dec_as_i32");
     return (int32_t) v;
 }
 
 static void if_plot_init(const char *x, const char *y) {
+    mark("if_plot_init");
     (void) x;
     (void) y;
 }
 
 static void if_plot_add_graph(const char *n) {
+    mark("if_plot_add_graph");
     (void) n;
 }
 
 static void if_plot_set_graph(int g) {
+    mark("if_plot_set_graph");
     (void) g;
 }
 
 static void if_plot_send_points(float x, float y) {
+    mark("if_plot_send_points");
     (void) x;
     (void) y;
 }
@@ -945,6 +1068,35 @@ void fc_vesc_if_init(void) {
 
 void fc_vesc_if_deinit(void) {
     floatcore_vesc_if = NULL;
+}
+
+// Последняя функция интерфейса, в которую вошёл поток, и сколько времени
+// назад это было (ТЗ v0.9H §18). Если возраст растёт, а имя не меняется —
+// поток из этого вызова не вернулся.
+// Защёлкнутый период сна и абсолютная отметка пробуждения. Нужны потому, что
+// статистика сна их не показывает: она пишется ПОСЛЕ возврата из сна, и вызов,
+// который не вернулся, в неё не попадает (ТЗ v0.9H §18).
+uint32_t fc_thread_period_ticks(size_t i) {
+    return i < S.thread_count ? (uint32_t) S.threads[i].period_ticks : 0;
+}
+
+uint32_t fc_thread_last_wake(size_t i) {
+    return i < S.thread_count ? (uint32_t) S.threads[i].last_wake : 0;
+}
+
+const char *fc_thread_stage(size_t i, uint64_t *age_us) {
+    if (i >= S.thread_count) {
+        if (age_us) {
+            *age_us = 0;
+        }
+        return NULL;
+    }
+    const char *st = S.threads[i].stage;
+    if (age_us) {
+        uint64_t t = S.threads[i].stage_us;
+        *age_us = t ? fc_uptime_us() - t : 0;
+    }
+    return st ? st : "(ещё не звал)";
 }
 
 const char *fc_thread_name(size_t i) {

@@ -93,8 +93,12 @@ void fc_gap_port_capture(uint64_t now_us, uint64_t prev_us, uint32_t gap_us) {
     // выставлен как «неизвестно», а не как «свободна». Разница существенная:
     // ведущая версия происхождения зазора в 110 мс — именно доступ к flash
     // с отключением кэша, и подменять незнание нулём здесь нельзя.
-    e.nvs_busy = false;
-    e.nvs_busy_known = false;
+    // Спрашиваем у хранилища, а не подставляем false (ТЗ v0.9H §5). Именно
+    // эта строчка раньше говорила «НЕИЗВЕСТНО» и оставляла версию про flash
+    // непроверяемой.
+    uint64_t flash_since = 0;
+    e.nvs_busy = fc_storage_busy(&flash_since);
+    e.nvs_busy_known = true;
 
     fc_gap_trace_capture(&e);
 }

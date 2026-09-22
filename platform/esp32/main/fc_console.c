@@ -681,8 +681,15 @@ static void cmd_sched(void) {
 
 static void cmd_tasks(void) {
     printf("задачи FloatCore:\n");
-    printf("  %-14s свободно минимум %u B из 5120 (единая цепочка: датчик -> Refloat)\n",
-           "fc_imu_rt", (unsigned) fc_imu_stack_watermark());
+    // Размер берётся из того же определения, что и создание задачи: зашитое
+    // число здесь однажды уже разошлось с действительностью (ТЗ v0.9H §3).
+    {
+        unsigned free_b = (unsigned) fc_imu_rt_stack_watermark();
+        printf("  %-14s свободно минимум %u B из %u (%.0f %%) %s\n", "fc_imu_rt", free_b,
+               (unsigned) FC_IMU_RT_STACK_BYTES,
+               100.0 * (double) free_b / (double) FC_IMU_RT_STACK_BYTES,
+               free_b < FC_IMU_RT_STACK_WARN_BYTES ? "<- ЗАПАС ИСЧЕРПАН" : "");
+    }
     printf("  %-14s свободно минимум %u B из 4096 (supervisor)\n", "fc_super",
            (unsigned) fc_supervisor_stack_watermark());
     printf("  %-14s свободно минимум %u B из 3072 (хранилище)\n", "fc_nvs",
@@ -690,7 +697,18 @@ static void cmd_tasks(void) {
     for (size_t i = 0; i < fc_thread_count(); ++i) {
         printf("  %-14s свободно минимум %u B из 12288 (задача Refloat)\n", fc_thread_name(i),
                (unsigned) fc_thread_stack_watermark(i));
-    }
+
+        {
+            uint64_t age = 0;
+            const char *st = fc_thread_stage(i, &age);
+            printf("  %-14s в вызове %s, %llu мкс назад%s\n", "", st ? st : "?",
+                   (unsigned long long) age,
+                   age > 1000000ull ? "   <- ИЗ ВЫЗОВА НЕ ВЕРНУЛСЯ" : "");
+            printf("  %-14s период сна защёлкнут на %" PRIu32 " тиков, отметка пробуждения %" PRIu32
+                   ", тик сейчас %" PRIu32 "\n",
+                   "", fc_thread_period_ticks(i), fc_thread_last_wake(i),
+                   (uint32_t) xTaskGetTickCount());
+        }    }
 #if CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS
     static char buf[1024];
     vTaskList(buf);
@@ -700,6 +718,22 @@ static void cmd_tasks(void) {
 
 static void print_timing(FcTimingChannel ch) {
     FcTimingStats t = fc_timing_get(ch);
+    if (t.iterations == 0 && t.exec_samples) {
+        // Канал без отметок периода: он меряет не цикл задачи, а отдельный
+        // участок внутри неё (например, транзакцию I²C). Пропускать такой
+        // канал нельзя — именно в нём и оказалась неучтённая работа.
+        printf("  %-26s участок внутри задачи, n=%llu\n", t.name,
+               (unsigned long long) t.exec_samples);
+        printf("      исполнение mean %6.1f  p99 %6" PRIu32 "  min %6" PRIu32 "  max %6" PRIu32
+               " us  (НАСТЕННОЕ: вытеснение включено)\n",
+               (double) t.exec_sum_us / (double) t.exec_samples, t.exec_p99_us, t.exec_min_us,
+               t.exec_max_us);
+        printf("      вытеснение mean %6.1f  max %6" PRIu32 " us   собственное CPU mean %6.1f  "
+               "max %6" PRIu32 " us\n",
+               (double) t.preempt_sum_us / (double) t.exec_samples, t.preempt_max_us,
+               (double) t.net_sum_us / (double) t.exec_samples, t.net_max_us);
+        return;
+    }
     if (t.iterations == 0) {
         printf("  %-26s нет итераций\n", t.name);
         return;
@@ -912,6 +946,24 @@ static void cmd_persist(void) {
     printf("persist: значение в конфигурации сейчас %.3f\n",
            (double) refloat_facade_config_test_value());
     printf("persist: коммит выполняет отдельная задача хранилища, не контур\n");
+    FcStorageEvent ev[FC_STORAGE_EVENTS];
+    uint32_t n = fc_storage_events(ev, FC_STORAGE_EVENTS);
+    uint64_t since = 0;
+    printf("flash сейчас      %s\n", fc_storage_busy(&since) ? "ЗАНЯТ" : "свободен");
+    if (n == 0) {
+        printf("операций с flash  ни одной после загрузки\n");
+        printf("  Это и есть ответ на вопрос «виновата ли flash»: если провалы\n");
+        printf("  планирования есть, а операций нет, — версия не подтверждается.\n");
+    } else {
+        uint64_t now = fc_uptime_us();
+        printf("операций с flash  %" PRIu32 " (от свежей к старым; кэш на это время отключён,\n", n);
+        printf("                  встают ОБА ядра)\n");
+        for (uint32_t k = 0; k < n; ++k) {
+            printf("  #%-2" PRIu32 " %8.3f с назад, длительность %6" PRIu32 " мкс, %s\n", k,
+                   (double) (now - ev[k].start_us) / 1e6, ev[k].duration_us,
+                   ev[k].ok ? "успех" : "ОШИБКА");
+        }
+    }
 }
 
 static void cmd_timing_reset(void) {
@@ -1145,6 +1197,7 @@ static void cmd_imu_freeze(void) {
 
 static void cmd_help(void) {
     printf("диагностика (read-only): status | supervisor | imu | i2cscan | timing | timing-hist |\n");
+    printf("                         cpu [мс] |\n");
     printf("                         tasks | heap | config | safety | imu-cal-show | help\n");
 #if FC_CAN_RX_AVAILABLE
     printf("пороги напряжения:       tiltback | tiltback <lv> <hv>\n");
@@ -1683,6 +1736,71 @@ static void cmd_gain_scale(const char *arg) {
 }
 
 
+
+// Доля процессора по задачам (ТЗ v0.9H §8, §18).
+//
+// Зачем понадобилось, хотя есть собственные каналы таймингов. Они меряют
+// только то, что мы сами обернули метками, и ожидание I²C внутри задачи
+// датчика (в среднем около 900 мкс на каждые 2 мс) не попадает ни в один из
+// них. Пока доля простоя ядра неизвестна, нельзя отличить «задача спит, и её
+// не будят» от «задача готова, и её не выбирают» — а это два совершенно
+// разных дефекта.
+//
+// Считается по РАЗНОСТИ двух снимков, а не по абсолютным счётчикам: иначе
+// цифра была бы средним за всё время с загрузки и любой режим тонул бы в
+// истории.
+#define CPU_MAX_TASKS 24
+
+static void cmd_cpu(const char *arg) {
+    uint32_t window_ms = 2000;
+    if (arg && *arg) {
+        uint32_t v = (uint32_t) strtoul(arg, NULL, 10);
+        if (v >= 200 && v <= 20000) {
+            window_ms = v;
+        }
+    }
+
+    static TaskStatus_t a[CPU_MAX_TASKS], b[CPU_MAX_TASKS];
+    uint32_t t0 = 0, t1 = 0;
+    UBaseType_t na = uxTaskGetSystemState(a, CPU_MAX_TASKS, &t0);
+    vTaskDelay(pdMS_TO_TICKS(window_ms));
+    UBaseType_t nb = uxTaskGetSystemState(b, CPU_MAX_TASKS, &t1);
+
+    uint32_t total = t1 - t0;
+    if (na == 0 || nb == 0 || total == 0) {
+        printf("статистика времени недоступна\n");
+        return;
+    }
+    printf("доля процессора за %" PRIu32 " мс (сумма по ОБОИМ ядрам = 200 %%):\n", window_ms);
+    double idle[2] = {0.0, 0.0};
+    for (UBaseType_t i = 0; i < nb; ++i) {
+        uint32_t prev = 0;
+        for (UBaseType_t j = 0; j < na; ++j) {
+            if (a[j].xHandle == b[i].xHandle) {
+                prev = a[j].ulRunTimeCounter;
+                break;
+            }
+        }
+        uint32_t d = b[i].ulRunTimeCounter - prev;
+        double pct = 100.0 * (double) d / (double) total;
+        int core = (int) b[i].xCoreID;
+        if (core != 0 && core != 1) {
+            core = -1;
+        }
+        if (!strncmp(b[i].pcTaskName, "IDLE", 4) && core >= 0) {
+            idle[core] = pct;
+        }
+        if (pct >= 0.05) {
+            printf("  %-16s ядро %-2s приоритет %2u  %6.2f %%\n", b[i].pcTaskName,
+                   core < 0 ? "любое" : (core ? "1" : "0"), (unsigned) b[i].uxCurrentPriority, pct);
+        }
+    }
+    printf("  ------------------------------------------------\n");
+    printf("  простой ядра 0 %6.2f %%,  ядра 1 %6.2f %%\n", idle[0], idle[1]);
+    printf("  Простой около нуля означает, что ядро занято целиком: задача с\n");
+    printf("  низшим приоритетом на нём не получит процессор НИКОГДА.\n");
+}
+
 static void cmd_gain_noi(void) {
     if (!refloat_facade_disable_integral()) {
         printf("ОТКЛОНЕНО: Refloat не запущен\n");
@@ -1710,6 +1828,8 @@ static void dispatch(const char *line) {
         cmd_supervisor();
     } else if (!strcmp(line, "imu")) {
         cmd_imu();
+    } else if (!strncmp(line, "cpu", 3) && (line[3] == 0 || line[3] == ' ')) {
+        cmd_cpu(line[3] ? line + 4 : NULL);
     } else if (!strcmp(line, "tasks")) {
         cmd_tasks();
     } else if (!strcmp(line, "sched")) {

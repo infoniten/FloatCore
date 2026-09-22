@@ -212,6 +212,9 @@ static void can_rx_task(void *arg) {
         twai_message_t m;
         esp_err_t err = twai_receive(&m, pdMS_TO_TICKS(200));
         uint64_t now = fc_uptime_us();
+        // Отметка ПОСЛЕ twai_receive: ожидание кадра — это сон, а не работа,
+        // и включать его в исполнение значило бы мерить простой шины.
+        fc_timing_exec_begin(FC_TIMING_CAN_RX);
         if (err == ESP_OK) {
             account(&m, now);
         } else if (err != ESP_ERR_TIMEOUT) {
@@ -224,6 +227,7 @@ static void can_rx_task(void *arg) {
             refresh_status();
             fc_can_health_tick(&C.health, now);
         }
+        fc_timing_exec_end(FC_TIMING_CAN_RX);
     }
     refresh_status();
     C.task = NULL;
