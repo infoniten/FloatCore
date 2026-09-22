@@ -715,9 +715,13 @@ static void print_timing(FcTimingChannel ch) {
            t.late, 100.0 * (double) t.late / (double) t.iterations, t.missed, t.overflow);
     if (t.exec_samples) {
         printf("      исполнение mean %6.1f  p99 %6" PRIu32 "  min %6" PRIu32 "  max %6" PRIu32
-               " us\n",
+               " us  (НАСТЕННОЕ: вытеснение включено)\n",
                (double) t.exec_sum_us / (double) t.exec_samples, t.exec_p99_us, t.exec_min_us,
                t.exec_max_us);
+        printf("      вытеснение mean %6.1f  max %6" PRIu32 " us   собственное CPU mean %6.1f  "
+               "max %6" PRIu32 " us\n",
+               (double) t.preempt_sum_us / (double) t.exec_samples, t.preempt_max_us,
+               (double) t.net_sum_us / (double) t.exec_samples, t.net_max_us);
     }
 }
 
@@ -1176,6 +1180,7 @@ static void cmd_help(void) {
     printf("МОТОРНЫЙ СТЕНД (колесо вывешено!):\n");
     printf("                         motor-status | motor-arm | motor-disarm\n");
     printf("                         motor-run <А> <мс> | motor-stop\n");
+    printf("                         motor-oneshot-prep | motor-oneshot-fire\n");
     printf("                         motor-clear-latch | motor-inject <маска> |\n");
     printf("                         motor-reset-stats\n");
 #endif
@@ -1255,6 +1260,18 @@ static void cmd_motor_status(void) {
            ", максимум %" PRIu32 " мкс (граница %u)\n",
            e.skew_last_us, e.skew_p50_us, e.skew_p99_us, e.skew_max_us,
            (unsigned) FC_DUAL_MAX_SKEW_US);
+    if (e.path_samples) {
+        printf("стоимость пути    mean %.1f, p50 %" PRIu32 ", p99 %" PRIu32 ", p99.9 %" PRIu32
+               ", min %" PRIu32 ", max %" PRIu32 " мкс  (n=%llu)\n",
+               (double) e.path_sum_us / (double) e.path_samples, e.path_p50_us, e.path_p99_us,
+               e.path_p999_us, e.path_min_us, e.path_max_us,
+               (unsigned long long) e.path_samples);
+        printf("                  Motor Gate -> координатор -> сериализация 118 -> TX -> "
+               "сериализация 100 -> TX\n");
+        printf("                  доля периода 2000 мкс: mean %.2f %%, p99 %.2f %%\n",
+               100.0 * (double) e.path_sum_us / (double) e.path_samples / 2000.0,
+               100.0 * (double) e.path_p99_us / 2000.0);
+    }
     printf("кадры мотору      попыток %llu, ушло %llu, неудач %llu, отвергнуто сборкой %llu\n",
            (unsigned long long) m.attempts, (unsigned long long) m.sent,
            (unsigned long long) m.failed, (unsigned long long) m.build_rejected);
@@ -1327,6 +1344,88 @@ static void cmd_motor_inject(const char *arg) {
 static void cmd_motor_reset(void) {
     fc_motor_experiment_reset_stats();
     printf("статистика моторного стенда обнулена\n");
+}
+
+
+// ------------------------------------------- одношаговая команда (ТЗ v0.9G §11, §12)
+//
+// Два шага намеренно. Подготовка снимает угол и команду Refloat, считает, что
+// именно уйдёт, и печатает чекпойнт. Отправка без действительного токена
+// отвергается. Смысл не в бюрократии: между «посмотреть, что получится» и
+// «сделать» должно стоять действие, которое нельзя совершить по инерции.
+static struct {
+    bool valid;
+    uint64_t prepared_us;
+    float amps;
+    float pitch;
+    float refloat_a;
+} ONESHOT;
+
+// Токен живёт минуту. Дольше — и доска может оказаться уже в другом положении,
+// а чекпойнт описывал бы прошлое.
+#define ONESHOT_TTL_US 60000000ull
+
+static void cmd_oneshot_prep(void) {
+    RefloatShadowFields sh;
+    refloat_facade_shadow(&sh);
+
+    float refloat_a = sh.balance_current;
+    float amps;
+    if (!(refloat_a > 0.0f) && !(refloat_a < 0.0f)) {
+        printf("ОТКЛОНЕНО: команда Refloat равна нулю — знак не определён.\n");
+        printf("  Наклоните стойку так, чтобы появилась ошибка тангажа, и повторите.\n");
+        ONESHOT.valid = false;
+        return;
+    }
+    amps = refloat_a > 0.0f ? FC_MOTOR_ONESHOT_MAX_A : -FC_MOTOR_ONESHOT_MAX_A;
+
+    ONESHOT.valid = true;
+    ONESHOT.prepared_us = fc_uptime_us();
+    ONESHOT.amps = amps;
+    ONESHOT.pitch = sh.balance_pitch;
+    ONESHOT.refloat_a = refloat_a;
+
+    printf("=== ЧЕКПОЙНТ ОДНОШАГА =========================================\n");
+    printf("угол (balance_pitch)   %+.3f град,  setpoint %+.3f,  ошибка %+.3f\n",
+           (double) sh.balance_pitch, (double) sh.setpoint,
+           (double) (sh.setpoint - sh.balance_pitch));
+    printf("команда Refloat        %+.3f А  (теневая, к мотору не идёт)\n", (double) refloat_a);
+    printf("предел одношага        %.2f А\n", (double) FC_MOTOR_ONESHOT_MAX_A);
+    printf("УЙДЁТ НА КАЖДЫЙ МОТОР  %+.3f А   -> суммарный момент %+.3f Н·м\n", (double) amps,
+           (double) (amps * 0.8901f));
+    printf("направление            %s\n",
+           amps > 0.0f ? "положительный ток -> колесо к НОСУ (край без фанеры)"
+                       : "отрицательный ток -> колесо к ХВОСТУ (край с фанерой)");
+    printf("ожидаемое движение     короткий рывок, затем свободный выбег\n");
+    printf("watchdog               кадр ОДИН, повторов нет: ESC обязан снять момент\n");
+    printf("                       по своему таймауту 50 мс\n");
+    printf("токен действителен     60 с.  Отправить: motor-oneshot-fire\n");
+    printf("===============================================================\n");
+}
+
+static void cmd_oneshot_fire(void) {
+    if (!ONESHOT.valid) {
+        printf("ОТКЛОНЕНО: нет действительной подготовки. Сначала motor-oneshot-prep\n");
+        return;
+    }
+    if (fc_uptime_us() - ONESHOT.prepared_us > ONESHOT_TTL_US) {
+        ONESHOT.valid = false;
+        printf("ОТКЛОНЕНО: токен просрочен. Чекпойнт описывал прошлое положение.\n");
+        return;
+    }
+    // Токен одноразовый: гасится ДО отправки, чтобы повтор был невозможен
+    // даже если дальше что-то пойдёт не так.
+    ONESHOT.valid = false;
+
+    uint32_t verdict = 0;
+    uint64_t t0 = fc_uptime_us();
+    bool ok = fc_motor_experiment_oneshot(ONESHOT.amps, &verdict);
+    uint64_t dt = fc_uptime_us() - t0;
+
+    printf("одношаг: %s, %+.3f А, вердикт гейта %s, путь %llu мкс\n", ok ? "ОТПРАВЛЕН" : "ОТКЛОНЁН",
+           (double) ONESHOT.amps, fc_motor_gate_verdict_name((FcGateVerdict) verdict),
+           (unsigned long long) dt);
+    printf("  повторов не будет. Снятие момента — дело таймаута ESC.\n");
 }
 
 #endif // FC_MOTOR_BACKEND_AVAILABLE
@@ -1583,6 +1682,7 @@ static void cmd_gain_scale(const char *arg) {
     cmd_gains();
 }
 
+
 static void cmd_gain_noi(void) {
     if (!refloat_facade_disable_integral()) {
         printf("ОТКЛОНЕНО: Refloat не запущен\n");
@@ -1746,6 +1846,10 @@ static void dispatch(const char *line) {
 #if FC_MOTOR_BACKEND_AVAILABLE
     } else if (!strcmp(line, "motor-status")) {
         cmd_motor_status();
+    } else if (!strcmp(line, "motor-oneshot-prep")) {
+        cmd_oneshot_prep();
+    } else if (!strcmp(line, "motor-oneshot-fire")) {
+        cmd_oneshot_fire();
     } else if (!strcmp(line, "motor-arm")) {
         cmd_motor_arm();
     } else if (!strcmp(line, "motor-disarm")) {

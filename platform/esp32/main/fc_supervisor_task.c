@@ -37,6 +37,11 @@ static void supervisor_task(void *arg) {
     TickType_t next = xTaskGetTickCount();
     for (;;) {
         vTaskDelayUntil(&next, configTICK_RATE_HZ / FC_SUPERVISOR_HZ);
+        // Отметка периода и начала итерации — в момент пробуждения, как и у
+        // остальных каналов. Супервизор делит ядро с контуром, и без учёта
+        // его времени бюджет ядра выглядел бы легче, чем он есть.
+        fc_timing_tick(FC_TIMING_SUPERVISOR);
+        fc_timing_exec_begin(FC_TIMING_SUPERVISOR);
         uint64_t now = (uint64_t) esp_timer_get_time();
 
         // Дорогие поля снимков зазоров: обход кучи и стеков стоит слишком
@@ -112,10 +117,12 @@ static void supervisor_task(void *arg) {
         fc_supervisor_report_calibration_valid(fc_imu_rt_cal_status() == FC_IMU_CAL_VALID, now);
 
         fc_supervisor_poll(now);
+        fc_timing_exec_end(FC_TIMING_SUPERVISOR);
     }
 }
 
 void fc_supervisor_task_start(void) {
+    fc_timing_set_nominal(FC_TIMING_SUPERVISOR, 1000000u / FC_SUPERVISOR_HZ);
     // Приоритет выше aux, но НИЖЕ контура и главного потока Refloat.
     //
     // Изначально здесь стояло FC_PRIO_REFLOAT + 2 = 14, то есть ровно

@@ -30,8 +30,26 @@ void fc_motor_gate_init(void) {
 }
 
 void fc_motor_gate_set_allowed_origins(uint32_t mask) {
-    G.allowed_origins = mask;
+    // Бит REFLOAT этой функцией не ставится НИКОГДА. Иначе замкнутый контур
+    // можно было бы включить мимо своего флага — обычной установкой маски,
+    // что сделало бы всю надстройку §13 декоративной.
+    mask &= ~(1u << FC_MOTOR_ORIGIN_REFLOAT);
+    G.allowed_origins = (G.allowed_origins & (1u << FC_MOTOR_ORIGIN_REFLOAT)) | mask;
 }
+
+#if FC_CLOSED_LOOP_AVAILABLE
+void fc_motor_gate_set_closed_loop(bool on) {
+    if (on) {
+        G.allowed_origins |= (1u << FC_MOTOR_ORIGIN_REFLOAT);
+    } else {
+        G.allowed_origins &= ~(1u << FC_MOTOR_ORIGIN_REFLOAT);
+    }
+}
+
+bool fc_motor_gate_closed_loop(void) {
+    return (G.allowed_origins & (1u << FC_MOTOR_ORIGIN_REFLOAT)) != 0u;
+}
+#endif
 
 uint32_t fc_motor_gate_allowed_origins(void) {
     return G.allowed_origins;

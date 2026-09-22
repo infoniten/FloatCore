@@ -29,6 +29,7 @@ typedef struct {
     uint64_t last_us;
     bool has_prev;
     uint64_t exec_begin_us;
+    uint64_t preempt_begin_us;
     bool exec_open;
     uint32_t bin_width_us;
     uint32_t bins[FC_TIMING_BINS + 1];       // последняя — переполнение
@@ -52,6 +53,7 @@ static const char *const kNames[FC_TIMING_COUNT] = {
     [FC_TIMING_MAIN] = "refloat_thd",
     [FC_TIMING_AUX] = "aux_thd",
     [FC_TIMING_IMU_READ] = "icm20948 read",
+    [FC_TIMING_SUPERVISOR] = "fc_super",
 };
 
 uint64_t fc_uptime_us(void) {
@@ -165,11 +167,17 @@ void fc_timing_tick(FcTimingChannel ch) {
     bin_add(c->bins, c->bin_width_us, dt, &c->s.overflow);
 }
 
+// Суммарная измеренная занятость ядра реального времени. Инкрементируется в
+// конце КАЖДОЙ итерации любого канала, поэтому разность двух отсчётов есть
+// чужая работа, прошедшая между ними.
+static uint64_t g_core_busy_us;
+
 void fc_timing_exec_begin(FcTimingChannel ch) {
     if (ch >= FC_TIMING_COUNT) {
         return;
     }
     g_ch[ch].exec_begin_us = fc_uptime_us();
+    g_ch[ch].preempt_begin_us = g_core_busy_us;
     g_ch[ch].exec_open = true;
 }
 
@@ -180,6 +188,22 @@ void fc_timing_exec_end(FcTimingChannel ch) {
     FcChannel *c = &g_ch[ch];
     c->exec_open = false;
     uint32_t dur = (uint32_t) (fc_uptime_us() - c->exec_begin_us);
+
+    // Разность берётся ДО собственного вклада, иначе итерация учла бы саму
+    // себя. Вклад добавляется ниже, уже после расчёта.
+    uint64_t preempt64 = g_core_busy_us - c->preempt_begin_us;
+    uint32_t preempt = preempt64 > dur ? dur : (uint32_t) preempt64;
+    uint32_t net = dur - preempt;
+    c->s.preempt_sum_us += preempt;
+    if (preempt > c->s.preempt_max_us) {
+        c->s.preempt_max_us = preempt;
+    }
+    c->s.net_sum_us += net;
+    if (net > c->s.net_max_us) {
+        c->s.net_max_us = net;
+    }
+    g_core_busy_us += dur;
+
     ++c->s.exec_samples;
     c->s.exec_sum_us += dur;
     if (dur < c->s.exec_min_us) {

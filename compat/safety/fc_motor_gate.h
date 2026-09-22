@@ -99,6 +99,22 @@ typedef struct {
  */
 #define FC_GATE_ALLOWED_ORIGINS_V09A (1u << FC_MOTOR_ORIGIN_EXPERIMENT)
 
+#if FC_CLOSED_LOOP_AVAILABLE
+/**
+ * Впустить источник REFLOAT в маску гейта (ТЗ v0.9G §13).
+ *
+ * Это ЕДИНСТВЕННЫЙ способ, которым контур балансировки может дойти до
+ * backend-а. По умолчанию выключено, и включение действует только в текущем
+ * сеансе: перезагрузка возвращает выключенное состояние.
+ *
+ * Само по себе включение тягу не разрешает. Дальше стоят ещё две двери:
+ * супервизор обязан разрешать выход (fc_supervisor_motor_output_permitted) и
+ * координатор обязан быть вооружён.
+ */
+void fc_motor_gate_set_closed_loop(bool on);
+bool fc_motor_gate_closed_loop(void);
+#endif
+
 void fc_motor_gate_init(void);
 
 /**

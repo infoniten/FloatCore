@@ -398,6 +398,7 @@ static void test_calibration_required_for_ready(void) {
 }
 
 void test_shadow_all(void);
+void test_closed_loop_all(void);
 
 int main(void) {
     printf("\n\033[1mТесты ядра безопасности: Supervisor, Motor Gate, IMU health\033[0m\n");
@@ -418,6 +419,7 @@ int main(void) {
     test_imu_policy_all();
     test_limits_plumbing_all();
     test_shadow_all();
+    test_closed_loop_all();
 
     printf("\n================================================================\n");
     if (g_fail == 0) {

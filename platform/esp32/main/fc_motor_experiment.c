@@ -179,6 +179,51 @@ static const FcMotorBackend BACKEND = {
 
 // ------------------------------------------------------------- источник
 
+// Гистограмма стоимости пути передачи: 64 корзины по 10 мкс (0…640) плюс
+// переполнение. Шага в 10 мкс хватает: сама сериализация двух кадров и две
+// постановки в очередь лежат в десятках микросекунд, и различать их надо с
+// точностью, сравнимой с этой величиной.
+#define PATH_BINS 64u
+#define PATH_BIN_US 10u
+static uint32_t PATH_HIST[PATH_BINS + 1u];
+
+static void path_record(uint32_t us) {
+    uint32_t i = us / PATH_BIN_US;
+    ++PATH_HIST[i < PATH_BINS ? i : PATH_BINS];
+    ++E.st.path_samples;
+    E.st.path_sum_us += us;
+    if (E.st.path_samples == 1 || us < E.st.path_min_us) {
+        E.st.path_min_us = us;
+    }
+    if (us > E.st.path_max_us) {
+        E.st.path_max_us = us;
+    }
+}
+
+// Перцентиль по гистограмме — верхняя граница корзины, в которой накопленная
+// доля впервые достигает заданной. Оценка СВЕРХУ с точностью до ширины
+// корзины, и читать её надо именно так.
+static uint32_t path_pct(uint32_t permille) {
+    if (E.st.path_samples == 0) {
+        return 0;
+    }
+    uint64_t need = (E.st.path_samples * permille + 999u) / 1000u;
+    uint64_t acc = 0;
+    for (uint32_t i = 0; i <= PATH_BINS; ++i) {
+        acc += PATH_HIST[i];
+        if (acc >= need) {
+            return (i + 1u) * PATH_BIN_US;
+        }
+    }
+    return E.st.path_max_us;
+}
+
+static void path_refresh(void) {
+    E.st.path_p50_us = path_pct(500);
+    E.st.path_p99_us = path_pct(990);
+    E.st.path_p999_us = path_pct(999);
+}
+
 static void producer(void *arg) {
     (void) arg;
     TickType_t next = xTaskGetTickCount();
@@ -197,9 +242,11 @@ static void producer(void *arg) {
         // тяга снимется сама, а не то, что оператор её снял.
         if (!(E.inject & FC_MOTOR_INJECT_PRODUCER_STALL)) {
             E.st.last_command_us = now;
+            uint64_t t0 = fc_uptime_us();
             FcGateVerdict v =
                 fc_motor_gate_request_from(FC_MOTOR_ORIGIN_EXPERIMENT, FC_MOTOR_REQ_CURRENT,
                                            E.amps, now);
+            path_record((uint32_t) (fc_uptime_us() - t0));
             E.st.last_gate_verdict = (uint32_t) v;
             if (v == FC_GATE_ALLOWED) {
                 ++E.st.gate_allowed;
@@ -211,6 +258,7 @@ static void producer(void *arg) {
         xTaskDelayUntil(&next, period ? period : 1);
     }
 
+    path_refresh();
     E.run = false;
     E.st.running = false;
     E.st.remaining_ms = 0;
@@ -312,6 +360,38 @@ bool fc_motor_experiment_run(float amps, uint32_t ms) {
     return true;
 }
 
+bool fc_motor_experiment_oneshot(float amps, uint32_t *gate_verdict) {
+    if (gate_verdict) {
+        *gate_verdict = 0;
+    }
+    // Источник и одношаг несовместимы: иначе непонятно, чья команда ушла.
+    if (E.run) {
+        return false;
+    }
+    // Отвергаем, а не зажимаем. Зажатие превратило бы ошибку в расчёте
+    // величины в тихо уменьшенную команду, и мы бы об этом не узнали.
+    if (!isfinite(amps) || fabsf(amps) > FC_MOTOR_ONESHOT_MAX_A) {
+        return false;
+    }
+    uint64_t now = fc_uptime_us();
+    E.st.last_command_us = now;
+    uint64_t t0 = fc_uptime_us();
+    FcGateVerdict v =
+        fc_motor_gate_request_from(FC_MOTOR_ORIGIN_EXPERIMENT, FC_MOTOR_REQ_CURRENT, amps, now);
+    path_record((uint32_t) (fc_uptime_us() - t0));
+    E.st.last_gate_verdict = (uint32_t) v;
+    if (v == FC_GATE_ALLOWED) {
+        ++E.st.gate_allowed;
+    } else {
+        ++E.st.gate_rejected;
+    }
+    ++E.st.cycles;
+    if (gate_verdict) {
+        *gate_verdict = (uint32_t) v;
+    }
+    return v == FC_GATE_ALLOWED;
+}
+
 void fc_motor_experiment_stop(void) {
     E.stop_req = true;
 }
@@ -344,6 +424,12 @@ FcMotorExpStats fc_motor_experiment_stats(void) {
     FcMotorExpStats s = E.st;
     s.skew_p50_us = percentile(50);
     s.skew_p99_us = percentile(99);
+    // Перцентили стоимости пути считаются при чтении, а не копятся: иначе во
+    // время идущего прогона они показывали бы состояние на момент прошлой
+    // остановки, что читалось бы как свежее число.
+    s.path_p50_us = path_pct(500);
+    s.path_p99_us = path_pct(990);
+    s.path_p999_us = path_pct(999);
     return s;
 }
 
@@ -352,6 +438,7 @@ void fc_motor_experiment_reset_stats(void) {
     memset(E.skew_hist, 0, sizeof E.skew_hist);
     E.skew_n = 0;
     fc_can_bus_motor_reset_stats();
+    memset(PATH_HIST, 0, sizeof PATH_HIST);
 }
 
 #endif // FC_MOTOR_BACKEND_AVAILABLE
