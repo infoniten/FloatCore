@@ -397,6 +397,8 @@ static void test_calibration_required_for_ready(void) {
     check(fc_supervisor_request_ready(t += 1000), "после возврата калибровки READY снова достижим");
 }
 
+void test_shadow_all(void);
+
 int main(void) {
     printf("\n\033[1mТесты ядра безопасности: Supervisor, Motor Gate, IMU health\033[0m\n");
     test_states();
@@ -415,6 +417,7 @@ int main(void) {
     test_imu_time_model_all();
     test_imu_policy_all();
     test_limits_plumbing_all();
+    test_shadow_all();
 
     printf("\n================================================================\n");
     if (g_fail == 0) {

@@ -23,11 +23,28 @@
 // при снятии резервных копий (backups/vesc/README.md).
 #define FC_MCCONF_SIGNATURE 0x2efd0142u
 
+/**
+ * Моментная постоянная по соглашению VESC: Kt = 1.5 · пар полюсов · λ.
+ *
+ * Та же формула, что в refloat-upstream/src/motor_data.c:106 и в
+ * lib/utils.h:38. Держать её здесь отдельной функцией нужно затем, чтобы
+ * согласие с Refloat проверялось тестом, а не совпадением по памяти.
+ */
+float fc_vesc_torque_constant(uint8_t poles, float flux_linkage);
+
 typedef struct {
     float current_max;     // l_current_max, А
     float current_min;     // l_current_min, А (отрицательное)
     float in_current_max;  // l_in_current_max, А
     float in_current_min;  // l_in_current_min, А (отрицательное)
+
+    // Параметры мотора. Нужны не для управления током, а для того, чтобы
+    // Refloat знал НАСТОЯЩУЮ моментную постоянную: он переводит свой момент
+    // в ток через неё, и ошибка здесь умножает запрашиваемый ток ровно во
+    // столько же раз (docs/control_scale_audit.md).
+    float flux_linkage;    // foc_motor_flux_linkage, Вб
+    uint8_t motor_poles;   // si_motor_poles
+
     bool valid;
 } FcMcconfLimits;
 

@@ -98,6 +98,11 @@ bool fc_limits_sync(void) {
     floatcore_limits_set_esc(0, &la);
     floatcore_limits_set_esc(1, &lb);
     fc_vesc_if_refresh_limits();
+    // Эквивалентное потокосцепление ПАРЫ: координатор посылает одну и ту же
+    // величину обеим половинам, поэтому момент на валу — сумма, и Refloat
+    // должен видеть постоянную пары, а не одного мотора. Иначе в контуре
+    // остаётся скрытый множитель два.
+    fc_vesc_if_set_motor_params(ST.common.flux_linkage, ST.common.motor_poles);
     // Теневой разбор считает упор в предел ESC по фактическому значению, а
     // не по предположению.
     fc_shadow_set_esc_limit(ST.common.current_max);
@@ -105,6 +110,9 @@ bool fc_limits_sync(void) {
     ST.applied = true;
     ++ST.successes;
     ST.last_sync_us = fc_uptime_us();
+    FC_LOGI(TAG, "Kt пары %.4f Н·м/А (lambda %.6f, полюсов %u)",
+            (double) fc_vesc_torque_constant(ST.common.motor_poles, ST.common.flux_linkage),
+            (double) ST.common.flux_linkage, ST.common.motor_poles);
     FC_LOGI(TAG, "пределы с ESC: 118 %+.1f/%+.1f, 100 %+.1f/%+.1f, общий %+.1f/%+.1f А",
             (double) a.current_max, (double) a.current_min, (double) b.current_max,
             (double) b.current_min, (double) ST.common.current_max,

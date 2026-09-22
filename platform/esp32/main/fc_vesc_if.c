@@ -229,6 +229,20 @@ void fc_vesc_if_limits_seen(float *max_a, float *min_a) {
     }
 }
 
+void fc_vesc_if_set_motor_params(float flux_linkage, int poles) {
+    // Refloat переводит свой момент в ток через Kt = 1.5 · пар полюсов · λ
+    // (motor_data.c:106). Значит эти два числа задают МАСШТАБ всего контура:
+    // ошибка в λ во столько же раз меняет запрашиваемый ток.
+    //
+    // До v0.9F здесь стояла заглушка 0.0045 Вб при измеренных 0.0196 —
+    // вчетверо с лишним меньше, отчего Refloat просил во столько же раз
+    // больший ток (docs/control_scale_audit.md).
+    if (flux_linkage > 0.0f && poles > 0) {
+        S.cfg_float[CFG_PARAM_foc_motor_flux_linkage] = flux_linkage;
+        S.cfg_int[CFG_PARAM_si_motor_poles] = poles;
+    }
+}
+
 void fc_vesc_if_refresh_limits(void) {
     // Единственное место, где зеркало «конфигурации ESC» для Refloat
     // обновляется. Значения берутся из модели пределов, которая уже свела
@@ -498,6 +512,7 @@ static void shadow_observe(float current) {
     s.timestamp_us = fc_uptime_us();
     s.current = current;
     s.pitch = rf.pitch;
+    s.balance_pitch = rf.balance_pitch;
     s.roll = rf.roll;
     s.pitch_rate = rf.pitch_rate;
     s.setpoint = rf.setpoint;
@@ -907,7 +922,11 @@ void fc_vesc_if_init(void) {
     S.cfg_float[CFG_PARAM_l_temp_fet_start] = 85.0f;
     S.cfg_float[CFG_PARAM_l_temp_motor_start] = 85.0f;
     S.cfg_float[CFG_PARAM_l_max_duty] = 0.95f;
-    S.cfg_float[CFG_PARAM_foc_motor_flux_linkage] = 0.0045f;
+    // Заведомо МАЛОЕ умолчание до чтения с половин: при малой λ Refloat
+    // считает, что ампер даёт мало момента, и просит больше тока. Ошибаться
+    // надо в другую сторону, поэтому здесь стоит величина, близкая к
+    // измеренной паре, а не заниженная вчетверо, как было до v0.9F.
+    S.cfg_float[CFG_PARAM_foc_motor_flux_linkage] = 0.0396f;
     S.cfg_float[CFG_PARAM_IMU_mahony_kp] = 0.2f;
     S.cfg_int[CFG_PARAM_si_motor_poles] = 30;
     // 10S Li-ion — реальная батарея аппарата (ТЗ v0.7D §3). Было 15: заглушка

@@ -118,7 +118,8 @@ void fc_shadow_record(const FcShadowSample *s) {
     }
 
     // Корзины по модулю ошибки угла.
-    float err = s->pitch - s->setpoint;
+    // Ошибка считается так же, как в pid.c:58 — от balance_pitch.
+    float err = s->setpoint - s->balance_pitch;
     if (err < 0.0f) {
         err = -err;
     }
@@ -126,10 +127,14 @@ void fc_shadow_record(const FcShadowSample *s) {
         if (err < FC_SHADOW_ANGLE_EDGES[i]) {
             ++S.st.bin_n[i];
             S.st.bin_sum_raw[i] += a;
-            if (a >= S.esc_limit) {
+            // Сравнение с допуском, а не точное. Зажатие происходит внутри
+            // Refloat над float-величиной, и результат оказывается на единицы
+            // ULP ниже предела: точное `>=` не срабатывало никогда, и метрика
+            // показывала 0 % упора там, где команда стояла в потолке ESC.
+            if (a >= S.esc_limit - FC_SHADOW_LIMIT_EPS_A) {
                 ++S.st.bin_saturated_esc[i];
             }
-            if (a >= S.envelope) {
+            if (a >= S.envelope - FC_SHADOW_LIMIT_EPS_A) {
                 ++S.st.bin_saturated_env[i];
             }
             break;

@@ -1170,6 +1170,8 @@ static void cmd_help(void) {
     printf("политика IMU:            imu-policy | imu-accel-low-confirm <N>\n");
     printf("теневая команда:         shadow | shadow-tail [N] | shadow-reset\n");
     printf("пределы тока:            limits | limits-sync\n");
+    printf("коэффициенты:            gains | gain-scale <k> | gain-no-integral |\n");
+    printf("                         gain-restore\n");
 #if FC_MOTOR_BACKEND_AVAILABLE
     printf("МОТОРНЫЙ СТЕНД (колесо вывешено!):\n");
     printf("                         motor-status | motor-arm | motor-disarm\n");
@@ -1526,6 +1528,81 @@ static void cmd_limits_sync(void) {
     cmd_limits();
 }
 
+
+static void cmd_gains(void) {
+    RefloatGains g;
+    refloat_facade_gains(&g);
+    RefloatShadowFields f;
+    refloat_facade_shadow(&f);
+
+    float kt_ours = g.speed_constant > 0.0f ? 1.0f / g.speed_constant : 0.0f;
+    printf("коэффициенты балансировки Refloat\n");
+    printf("  kp  %.3f   kp2 %.3f   ki %.5f   ki_limit %.2f\n", (double) g.kp, (double) g.kp2,
+           (double) g.ki, (double) g.ki_limit);
+    printf("  kp_brake %.2f   kp2_brake %.2f   mahony_kp %.2f\n", (double) g.kp_brake,
+           (double) g.kp2_brake, (double) g.mahony_kp);
+    printf("  booster %.2f А   brkbooster %.2f А\n", (double) g.booster_current,
+           (double) g.brkbooster_current);
+    printf("постоянные момента\n");
+    printf("  эталон Refloat  %.4f Н·м/А  (1.5 x 15 x 0.027)\n",
+           (double) g.torque_constant_compat);
+    printf("  наш мотор       %.4f Н·м/А  (1.5 x 15 x lambda)\n", (double) kt_ours);
+    printf("  отношение       %.3f\n",
+           kt_ours > 0.0f ? (double) (g.torque_constant_compat / kt_ours) : 0.0);
+    printf("масштаб контура (один мотор)\n");
+    if (kt_ours > 0.0f) {
+        float a_per_deg = g.kp * g.torque_constant_compat / kt_ours;
+        printf("  P: %.2f А на градус;  ±0.5 А при %.4f°;  ±5 А при %.3f°\n", (double) a_per_deg,
+               (double) (0.5f / a_per_deg), (double) (5.0f / a_per_deg));
+    }
+    if (refloat_facade_gains_modified()) {
+        printf("  ВНИМАНИЕ: коэффициенты ВРЕМЕННО изменены, вернуть — gain-restore\n");
+    }
+    printf("состояние сейчас\n");
+    printf("  pitch %.3f  balance_pitch %.3f  setpoint %.3f  ошибка %.3f°\n", (double) f.pitch,
+           (double) f.balance_pitch, (double) f.setpoint,
+           (double) (f.setpoint - f.balance_pitch));
+    printf("  P %.4f  I %.4f  rate_P %.4f  ->  ток %.3f А\n", (double) f.pid_p, (double) f.pid_i,
+           (double) f.pid_rate_p, (double) f.balance_current);
+}
+
+
+static void cmd_gain_scale(const char *arg) {
+    if (!arg || !*arg) {
+        printf("gain-scale <множитель 0.01..10>  |  gain-restore\n");
+        printf("  меняет kp, kp2 и ki ОДНОВРЕМЕННО, только в памяти Refloat.\n");
+        printf("  исходные сохраняются при первой правке.\n");
+        return;
+    }
+    float k = strtof(arg, NULL);
+    if (!refloat_facade_scale_gains(k)) {
+        printf("ОТКЛОНЕНО: Refloat не запущен либо множитель вне 0..10\n");
+        return;
+    }
+    printf("коэффициенты умножены на %.3f. ВЕРНУТЬ: gain-restore\n", (double) k);
+    cmd_gains();
+}
+
+static void cmd_gain_noi(void) {
+    if (!refloat_facade_disable_integral()) {
+        printf("ОТКЛОНЕНО: Refloat не запущен\n");
+        return;
+    }
+    printf("интегральная часть отключена (ki = 0, ki_limit = 0).\n");
+    printf("  В теневом режиме контур разомкнут, и интеграл упирается в предел\n");
+    printf("  за секунды: мерить по нему масштаб нечего. ВЕРНУТЬ: gain-restore\n");
+    cmd_gains();
+}
+
+static void cmd_gain_restore(void) {
+    if (!refloat_facade_restore_gains()) {
+        printf("восстанавливать нечего: коэффициенты не менялись\n");
+        return;
+    }
+    printf("исходные коэффициенты восстановлены\n");
+    cmd_gains();
+}
+
 static void dispatch(const char *line) {
     if (!strcmp(line, "status")) {
         cmd_status();
@@ -1640,6 +1717,14 @@ static void dispatch(const char *line) {
         cmd_shadow();
     } else if (!strcmp(line, "shadow-reset")) {
         cmd_shadow_reset();
+    } else if (!strcmp(line, "gain-no-integral")) {
+        cmd_gain_noi();
+    } else if (!strcmp(line, "gain-restore")) {
+        cmd_gain_restore();
+    } else if (!strncmp(line, "gain-scale", 10) && (line[10] == 0 || line[10] == ' ')) {
+        cmd_gain_scale(line[10] == ' ' ? line + 11 : NULL);
+    } else if (!strcmp(line, "gains")) {
+        cmd_gains();
     } else if (!strcmp(line, "limits")) {
         cmd_limits();
     } else if (!strcmp(line, "limits-sync")) {

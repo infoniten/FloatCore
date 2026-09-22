@@ -219,6 +219,9 @@ void fc_vesc_if_refresh_limits(void);
 /** Что Refloat читает через get_cfg_float прямо сейчас. */
 void fc_vesc_if_limits_seen(float *max_a, float *min_a);
 
+/** Сообщить Refloat настоящие параметры мотора (задают масштаб контура). */
+void fc_vesc_if_set_motor_params(float flux_linkage, int poles);
+
 // ------------------------------------------- стресс-тест шины I2C (v0.6C)
 // Диагностика железа: читает ICM-20948 без пауз, замещая штатную задачу.
 // К Refloat и к выходу на мотор отношения не имеет — см. fc_imu_stress.c.

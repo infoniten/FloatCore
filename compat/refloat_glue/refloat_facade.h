@@ -54,6 +54,10 @@ RefloatSnapshot refloat_facade_snapshot(void);
 // НЕ менялся: структура уже публична, просто до неё не доходили.
 typedef struct {
     float pitch, roll, pitch_rate;
+    // Регулятор работает от balance_pitch, а не от pitch: это отфильтрованный
+    // и смещённый угол (imu.c). Считать ошибку по pitch — значит считать не ту
+    // величину, что и делает контур.
+    float balance_pitch;
     float setpoint;
     float balance_current;
     float pid_p, pid_i, pid_rate_p;
@@ -62,6 +66,45 @@ typedef struct {
 } RefloatShadowFields;
 
 void refloat_facade_shadow(RefloatShadowFields *out);
+
+// Действующие коэффициенты балансировки. Нужны, чтобы формулу можно было
+// проверить численно, а не принять на веру по умолчаниям.
+typedef struct {
+    float kp, kp2, ki, ki_limit;
+    float kp_brake, kp2_brake;
+    float mahony_kp;
+    float booster_current, brkbooster_current;
+    float torque_constant_compat;  // постоянная эталонного мотора, Н·м/А
+    float speed_constant;          // 1/Kt нашего, А/Н·м
+} RefloatGains;
+
+void refloat_facade_gains(RefloatGains *out);
+
+// Временная правка коэффициентов для ТЕНЕВЫХ опытов (ТЗ v0.9F §11, §12).
+//
+// Меняется только конфигурация в памяти Refloat, upstream не трогается.
+// Исходные значения сохраняются при первом вызове и восстанавливаются
+// refloat_facade_restore_gains(). Оставить стенд в изменённой конфигурации
+// без явного восстановления — верный способ потом гадать, что измеряли.
+//
+// Масштаб применяется к kp, kp2 и ki ОДНОВРЕМЕННО: пока не понятен общий
+// масштаб, разделять вклады рано (ТЗ §11).
+bool refloat_facade_scale_gains(float scale);
+
+/** Задать составляющие по отдельности. Отрицательное значение — не менять. */
+bool refloat_facade_set_gains(float kp, float kp2, float ki);
+
+/**
+ * Отключить интегральную часть для изоляции P и D (ТЗ v0.9F §12, §13).
+ *
+ * В теневом режиме контур разомкнут, ошибка никогда не устраняется, и
+ * интегратор упирается в свой предел за секунды. Мерить по нему масштаб
+ * бессмысленно: он покажет ki_limit, а не отклик регулятора.
+ */
+bool refloat_facade_disable_integral(void);
+
+bool refloat_facade_restore_gains(void);
+bool refloat_facade_gains_modified(void);
 
 const char *refloat_facade_state_name(int state);
 const char *refloat_facade_stop_name(int stop_condition);

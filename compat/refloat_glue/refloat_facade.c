@@ -5,6 +5,7 @@
 
 #include "data.h"
 #include "conf/confparser.h"
+#include "lib/utils.h"
 #include "vesc_c_if.h"
 
 // Реализуется backend-ом платформы (host-mock или platform/esp32). Объявляется здесь,
@@ -43,6 +44,7 @@ void refloat_facade_shadow(RefloatShadowFields *out) {
     }
     const Data *d = (const Data *) info.arg;
     out->pitch = d->imu.pitch;
+    out->balance_pitch = d->imu.balance_pitch;
     out->roll = d->imu.roll;
     out->pitch_rate = d->imu.pitch_rate;
     out->setpoint = d->setpoint;
@@ -52,6 +54,129 @@ void refloat_facade_shadow(RefloatShadowFields *out) {
     out->pid_rate_p = d->pid.rate_p;
     out->sat = (int) d->state.sat;
     out->state = (int) d->state.state;
+}
+
+void refloat_facade_gains(RefloatGains *out) {
+    if (!out) {
+        return;
+    }
+    RefloatGains z = {0};
+    *out = z;
+    if (!started) {
+        return;
+    }
+    const Data *d = (const Data *) info.arg;
+    out->kp = d->float_conf.kp;
+    out->kp2 = d->float_conf.kp2;
+    out->ki = d->float_conf.ki;
+    out->ki_limit = d->float_conf.ki_limit;
+    out->kp_brake = d->float_conf.kp_brake;
+    out->kp2_brake = d->float_conf.kp2_brake;
+    out->mahony_kp = d->float_conf.mahony_kp;
+    out->booster_current = d->float_conf.booster_current;
+    out->brkbooster_current = d->float_conf.brkbooster_current;
+    out->torque_constant_compat = TORQUE_CONSTANT_COMPAT;
+    out->speed_constant = d->motor.speed_constant;
+}
+
+// Исходные коэффициенты. Сохраняются при первой правке, чтобы стенд всегда
+// можно было вернуть в состояние, в котором снимались прежние измерения.
+static struct {
+    bool saved;
+    float kp, kp2, ki, ki_limit;
+} BASELINE;
+
+static void reset_integral(Data *d) {
+    // Накопленный интеграл принадлежит прежним коэффициентам. Оставить его
+    // при смене масштаба — значит мерить отклик, к которому примешано
+    // состояние, набранное при другой настройке.
+    //
+    // Отдельно важно для отключения интеграла: обнуление ki останавливает
+    // РОСТ, но само значение остаётся в pid->i навсегда, а ki_limit = 0
+    // вдобавок снимает ограничитель целиком (pid.c:64 зажимает только при
+    // ki_limit > 0). Без этого сброса «интеграл отключён» означает «интеграл
+    // заморожен на последнем значении».
+    d->pid.i = 0.0f;
+}
+
+static Data *mutable_data(void) {
+    return started ? (Data *) info.arg : NULL;
+}
+
+static void save_baseline(const Data *d) {
+    if (!BASELINE.saved) {
+        BASELINE.kp = d->float_conf.kp;
+        BASELINE.kp2 = d->float_conf.kp2;
+        BASELINE.ki = d->float_conf.ki;
+        BASELINE.ki_limit = d->float_conf.ki_limit;
+        BASELINE.saved = true;
+    }
+}
+
+bool refloat_facade_scale_gains(float scale) {
+    Data *d = mutable_data();
+    if (!d || !(scale > 0.0f) || scale > 10.0f) {
+        return false;
+    }
+    save_baseline(d);
+    d->float_conf.kp = BASELINE.kp * scale;
+    d->float_conf.kp2 = BASELINE.kp2 * scale;
+    d->float_conf.ki = BASELINE.ki * scale;
+    // Предел интегратора масштабируется ВМЕСТЕ с ki. Без этого интеграл
+    // накручивается до прежнего потолка независимо от масштаба, и вся
+    // развёртка показывает один и тот же упор.
+    d->float_conf.ki_limit = BASELINE.ki_limit * scale;
+    reset_integral(d);
+    return true;
+}
+
+bool refloat_facade_set_gains(float kp, float kp2, float ki) {
+    Data *d = mutable_data();
+    if (!d) {
+        return false;
+    }
+    save_baseline(d);
+    if (kp >= 0.0f) {
+        d->float_conf.kp = kp;
+    }
+    if (kp2 >= 0.0f) {
+        d->float_conf.kp2 = kp2;
+    }
+    if (ki >= 0.0f) {
+        d->float_conf.ki = ki;
+    }
+    reset_integral(d);
+    return true;
+}
+
+bool refloat_facade_disable_integral(void) {
+    Data *d = mutable_data();
+    if (!d) {
+        return false;
+    }
+    save_baseline(d);
+    d->float_conf.ki = 0.0f;
+    d->float_conf.ki_limit = 0.0f;
+    reset_integral(d);
+    return true;
+}
+
+bool refloat_facade_restore_gains(void) {
+    Data *d = mutable_data();
+    if (!d || !BASELINE.saved) {
+        return false;
+    }
+    d->float_conf.kp = BASELINE.kp;
+    d->float_conf.kp2 = BASELINE.kp2;
+    d->float_conf.ki = BASELINE.ki;
+    d->float_conf.ki_limit = BASELINE.ki_limit;
+    reset_integral(d);
+    BASELINE.saved = false;
+    return true;
+}
+
+bool refloat_facade_gains_modified(void) {
+    return BASELINE.saved;
 }
 
 RefloatSnapshot refloat_facade_snapshot(void) {
