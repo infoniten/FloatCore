@@ -28,6 +28,10 @@
 
 static TaskHandle_t g_task;
 
+TaskHandle_t fc_supervisor_task_handle(void) {
+    return g_task;
+}
+
 uint32_t fc_supervisor_stack_watermark(void) {
     return g_task ? (uint32_t) uxTaskGetStackHighWaterMark(g_task) : 0;
 }

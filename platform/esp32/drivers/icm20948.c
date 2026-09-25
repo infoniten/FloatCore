@@ -8,6 +8,7 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "hal/i2c_ll.h"
 // Журнал через кольцо, а не напрямую в UART: icm20948_init() вызывается в
 // том числе ИЗ КОНТУРА — задача fc_imu_rt переинициализирует датчик после
 // серии отказов чтения. В этом сценарии драйвер печатает до полутора десятков
@@ -711,4 +712,50 @@ void icm20948_inject_read_failures(int count) {
 
 void icm20948_inject_frozen(int count) {
     D.inject_frozen = count;
+}
+
+// ------------------------------------------------ зонд шины (ТЗ v0.9I §3, §6, §9)
+
+void icm20948_scl_timing(icm20948_scl_timing_t *out) {
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof(*out));
+    i2c_dev_t *hw = I2C_LL_GET_HW(0);
+    int high = 0, low = 0, wait_high = 0;
+    i2c_ll_get_scl_clk_timing(hw, &high, &low, &wait_high);
+    out->scl_low_period = low;
+    out->scl_high_period = high;
+    out->scl_wait_high = wait_high;
+    out->scl_filter_en = hw->scl_filter_cfg.en;
+    out->scl_filter_thres = hw->scl_filter_cfg.thres;
+    out->sda_filter_en = hw->sda_filter_cfg.en;
+    out->sda_filter_thres = hw->sda_filter_cfg.thres;
+    out->source_hz = 80000000u;  // I2C_CLK_SRC_DEFAULT = APB на ESP32
+    out->requested_hz = D.cfg.i2c_hz;
+
+    // Обратный пересчёт по TRM, той же формулой, что i2c_ll_master_set_bus_timing:
+    // к low прибавляется 1, к high — вычтенная задержка фильтра.
+    int high_comp = 7;
+    if (out->scl_filter_en) {
+        high_comp = out->scl_filter_thres <= 2 ? 8 : out->scl_filter_thres + 6;
+    }
+    uint32_t cycles = (uint32_t) (low + 1) + (uint32_t) (high + high_comp);
+    out->programmed_hz = cycles ? out->source_hz / cycles : 0;
+}
+
+esp_err_t icm20948_probe_read(uint8_t reg, uint8_t *buf, size_t len, uint32_t *wall_us) {
+    if (!buf || len == 0 || len > 32 || !D.dev) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (D.current_bank != 0) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    int64_t t0 = esp_timer_get_time();
+    esp_err_t err = reg_read(reg, buf, len);
+    int64_t t1 = esp_timer_get_time();
+    if (wall_us) {
+        *wall_us = (uint32_t) (t1 - t0);
+    }
+    return err;
 }

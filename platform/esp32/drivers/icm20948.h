@@ -147,6 +147,39 @@ esp_err_t icm20948_scan(const icm20948_config_t *cfg, uint8_t *found, size_t max
 esp_err_t icm20948_probe_addr(const icm20948_config_t *cfg, uint8_t addr, uint8_t *who);
 
 /** Диагностика: заставить следующие N чтений завершиться ошибкой (ТЗ §28). */
+/**
+ * Запрограммированные параметры такта SCL, прочитанные ПРЯМО из регистров
+ * периферии I2C0 (ТЗ v0.9I §3). Не из конфигурации драйвера: конфигурация
+ * говорит, что просили, регистры — что записано в железо.
+ *
+ * Это всё ещё НЕ частота на проводе. Высокий полупериод ESP32 отсчитывает
+ * только после того, как вход увидел SCL высоким, поэтому медленный фронт
+ * удлиняет каждый такт, и регистры этого не покажут.
+ */
+typedef struct {
+    uint32_t source_hz;       // источник тактов периферии
+    int scl_low_period;       // как записано в регистр
+    int scl_high_period;
+    int scl_wait_high;
+    bool scl_filter_en;
+    int scl_filter_thres;
+    bool sda_filter_en;
+    int sda_filter_thres;
+    uint32_t requested_hz;    // что просили у драйвера
+    uint32_t programmed_hz;   // что следует из регистров, без учёта фронтов
+} icm20948_scl_timing_t;
+
+void icm20948_scl_timing(icm20948_scl_timing_t *out);
+
+/**
+ * Одно чтение len байт с адреса reg в ТЕКУЩЕМ банке, с замером настенного
+ * времени вызова API (ТЗ v0.9I §6, §9). Только для диагностики вне контура.
+ *
+ * Отказывает, если банк не 0 или не известен: зонд не должен ни переключать
+ * банк за спиной конвейера, ни читать не то, что думает.
+ */
+esp_err_t icm20948_probe_read(uint8_t reg, uint8_t *buf, size_t len, uint32_t *wall_us);
+
 void icm20948_inject_read_failures(int count);
 /** Диагностика: заставить драйвер повторять последний семпл (ТЗ §28). */
 void icm20948_inject_frozen(int count);

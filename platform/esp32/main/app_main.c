@@ -235,8 +235,8 @@ static void report_task(void *arg) {
                esp_get_minimum_free_heap_size());
         // uxTaskGetStackHighWaterMark на ESP-IDF возвращает БАЙТЫ — минимум
         // свободного стека за всё время жизни задачи.
-        printf("stack %-14s свободно минимум %" PRIu32 " B из 5120\n", "fc_imu_rt",
-               fc_imu_stack_watermark());
+        printf("stack %-14s свободно минимум %" PRIu32 " B из %u\n", "fc_imu_rt",
+               fc_imu_stack_watermark(), (unsigned) FC_IMU_RT_STACK_BYTES);
         printf("stack %-14s свободно минимум %" PRIu32 " B из 4096\n", "fc_super",
                fc_supervisor_stack_watermark());
         printf("stack %-14s свободно минимум %" PRIu32 " B из 3072\n", "fc_nvs",
@@ -396,7 +396,10 @@ void app_main(void) {
     printf("[floatcore] config test value = %.3f (leds.status.brightness_headlights_off)\n",
            (double) refloat_facade_config_test_value());
 
-    xTaskCreatePinnedToCore(report_task, "fc_report", 4096, NULL, 3, NULL, FC_CORE_HOUSEKEEPING);
+    // 5120, а не 4096 (ТЗ v0.9I §23): измерено 976 Б свободных из 4096, 24 %,
+    // ниже порога этапа. Задача печатает отчёт с плавающей точкой, и на неё
+    // приходится вся глубина printf.
+    xTaskCreatePinnedToCore(report_task, "fc_report", 5120, NULL, 3, NULL, FC_CORE_HOUSEKEEPING);
 #if FC_MOTOR_BACKEND_AVAILABLE
     // Транспорт мотору регистрируется ПОСЛЕ шины и ПОСЛЕ супервизора, и
     // только регистрируется: система остаётся обезоруженной, команда не

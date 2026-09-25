@@ -28,3 +28,8 @@ int esp32_test_log_count(void) {
 void esp32_test_log_reset(void) {
     g_log_count = 0;
 }
+
+// Хост однопоточный: всё исполняется «на ядре 1», как измеряемые задачи.
+int fc_current_core(void) {
+    return 1;
+}

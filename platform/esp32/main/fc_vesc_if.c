@@ -12,6 +12,7 @@
 #include "../../../compat/config/floatcore_limits.h"
 #include "fc_log_port.h"
 #include "fc_platform.h"
+#include "fc_rt_clock.h"
 #include "../../../compat/diag/fc_shadow.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
 
@@ -196,8 +197,24 @@ static void if_sleep_us(uint32_t us) {
             }
         }
         uint64_t t_sleep0 = (uint64_t) esp_timer_get_time();
-        mark("sleep:delay_until");
-        BaseType_t slept = xTaskDelayUntil(&t->last_wake, t->period_ticks);
+        BaseType_t slept;
+        // Главный поток — от аппаратного ритма, если его период совпадает с
+        // ритмом таймера (ТЗ v0.9I §20). Тик FreeRTOS будит задачу ядра 1 то
+        // от ядра 0, то от собственного тика со сдвигом фазы 765 мкс, и период
+        // прыгал. Семантика прежняя: периодическое пробуждение по абсолютной
+        // сетке, пропущенное срабатывание не догоняется.
+        if (t == &S.threads[0] && fc_rt_clock_running() &&
+            (uint32_t) t->period_ticks * (1000000u / configTICK_RATE_HZ) == fc_rt_clock_period_us()) {
+            fc_rt_clock_subscribe(FC_RT_CLOCK_SLOT_REFLOAT, t->handle);
+            mark("sleep:rt_clock");
+            slept = fc_rt_clock_wait(10) ? pdTRUE : pdFALSE;
+            // Отметка в тиках продолжает идти: при падении таймера ритм от
+            // тика подхватится без скачка.
+            t->last_wake = xTaskGetTickCount();
+        } else {
+            mark("sleep:delay_until");
+            slept = xTaskDelayUntil(&t->last_wake, t->period_ticks);
+        }
         mark("sleep:woke");
         uint32_t actual = (uint32_t) ((uint64_t) esp_timer_get_time() - t_sleep0);
         if (slept == pdFALSE) {
@@ -1076,6 +1093,14 @@ void fc_vesc_if_deinit(void) {
 // Защёлкнутый период сна и абсолютная отметка пробуждения. Нужны потому, что
 // статистика сна их не показывает: она пишется ПОСЛЕ возврата из сна, и вызов,
 // который не вернулся, в неё не попадает (ТЗ v0.9H §18).
+int fc_current_core(void) {
+    return (int) xPortGetCoreID();
+}
+
+TaskHandle_t fc_thread_handle(size_t i) {
+    return i < S.thread_count ? S.threads[i].handle : NULL;
+}
+
 uint32_t fc_thread_period_ticks(size_t i) {
     return i < S.thread_count ? (uint32_t) S.threads[i].period_ticks : 0;
 }

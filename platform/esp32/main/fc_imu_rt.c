@@ -37,6 +37,9 @@
 #include "esp_task_wdt.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "esp_freertos_hooks.h"
+#include "fc_rt_clock.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include <string.h>
@@ -110,6 +113,10 @@ static struct {
     volatile int accel_low_n;
 #endif
     uint32_t max_read_us;
+    uint64_t i2c_calls;
+    uint32_t i2c_hist[FC_IMU_I2C_HIST_BINS];
+    uint64_t i2c_wall_sum_us;
+    uint64_t i2c_others_sum_us;
     uint64_t iterations;
 
     volatile int stall_ms;
@@ -174,14 +181,186 @@ void fc_imu_rt_inject_stall(int ms) {
 
 // -------------------------------------------------------------------- задача
 
+#if FC_DIAG_LOOP_PROBES
+// Суммарное время, которое получили другие задачи ядра 1: главный поток
+// Refloat, простой ядра и супервизор. Вспомогательный поток Refloat живёт на
+// ядре 0 и сюда не входит. Счётчик FreeRTOS — в микросекундах esp_timer.
+static uint32_t others_runtime(void) {
+    uint32_t sum = 0;
+    TaskHandle_t h[3] = {(TaskHandle_t) fc_thread_handle(0), xTaskGetIdleTaskHandleForCore(1),
+                         (TaskHandle_t) fc_supervisor_task_handle()};
+    for (int i = 0; i < 3; ++i) {
+        if (h[i]) {
+            // Без подсчёта свободного стека и с заданным состоянием: оба
+            // вычисления дорогие, а нужен только счётчик времени.
+            TaskStatus_t st;
+            vTaskGetInfo(h[i], &st, pdFALSE, eRunning);
+            sum += (uint32_t) st.ulRunTimeCounter;
+        }
+    }
+    return sum;
+}
+#endif
+
+FcImuI2cSplit fc_imu_rt_i2c_split(void) {
+    FcImuI2cSplit r = {0};
+    r.calls = R.i2c_calls;
+    memcpy(r.hist, R.i2c_hist, sizeof(r.hist));
+    if (r.calls) {
+        r.wall_mean_us = (double) R.i2c_wall_sum_us / (double) r.calls;
+        r.others_mean_us = (double) R.i2c_others_sum_us / (double) r.calls;
+        r.own_mean_us = r.wall_mean_us - r.others_mean_us;
+    }
+    return r;
+}
+
+void fc_imu_rt_i2c_split_reset(void) {
+    R.i2c_calls = 0;
+    memset(R.i2c_hist, 0, sizeof(R.i2c_hist));
+    R.i2c_wall_sum_us = 0;
+    R.i2c_others_sum_us = 0;
+}
+
+// Перекрёстный снимок пробуждения (ТЗ v0.9I §20).
+//
+// Пробуждение задачи датчика дрожит: через раз оно опаздывает примерно на
+// 680 мкс после тика. Выше неё на ядре 1 нет задач, работающих с такой
+// частотой, поэтому подозревается закрытое прерывание — критическая секция,
+// попавшая на тик. Здесь в момент каждого пробуждения записывается, в каком
+// вызове интерфейса стоит главный поток Refloat, отдельно для поздних и для
+// своевременных пробуждений. Если поздние стабильно совпадают с одним вызовом,
+// а своевременные — нет, виновник назван.
+#define WAKE_SNAP_SLOTS 12
+// Время последнего тика FreeRTOS на КАЖДОМ ядре. В многоядерном IDF счётчик
+// тиков увеличивает только ядро 0 (port_systick.c), а ядро 1 на своём тике
+// лишь подбирает разбуженные задачи. Таймеры тиков у ядер независимые, и их
+// фазы расходятся. Если задача ядра 1 просыпается то по тику ядра 0, то по
+// собственному, её пробуждение будет прыгать ровно на эту разность фаз.
+static volatile uint64_t s_tick_us[2];
+
+static void IRAM_ATTR tick_hook_core0(void) {
+    s_tick_us[0] = (uint64_t) esp_timer_get_time();
+}
+
+static void IRAM_ATTR tick_hook_core1(void) {
+    s_tick_us[1] = (uint64_t) esp_timer_get_time();
+}
+
+static struct {
+    // сколько прошло от тика каждого ядра до пробуждения, суммы по видам
+    uint64_t d0_sum[2], d1_sum[2], n[2];
+    uint64_t phase_sum;   // фаза тика ядра 1 относительно ядра 0, мкс
+    uint64_t phase_n;
+    uint32_t phase_min, phase_max;
+    const char *name[WAKE_SNAP_SLOTS];
+    uint32_t late[WAKE_SNAP_SLOTS];
+    uint32_t ontime[WAKE_SNAP_SLOTS];
+    uint32_t overflow;
+    uint64_t prev_us;
+} WS;
+
+static void wake_snapshot(void) {
+    uint64_t now = fc_uptime_us();
+    uint64_t prev = WS.prev_us;
+    WS.prev_us = now;
+    if (prev == 0) {
+        return;
+    }
+    bool late = (now - prev) > 2400u;
+    {
+        uint64_t t0 = s_tick_us[0], t1 = s_tick_us[1];
+        int k = late ? 1 : 0;
+        if (t0 && t1 && now >= t0 && now >= t1) {
+            WS.d0_sum[k] += now - t0;
+            WS.d1_sum[k] += now - t1;
+            ++WS.n[k];
+            // Фаза: насколько тик ядра 1 позже тика ядра 0, по модулю тика.
+            uint32_t ph = (uint32_t) (((int64_t) t1 - (int64_t) t0) % 1000 + 1000) % 1000;
+            WS.phase_sum += ph;
+            if (WS.phase_n == 0 || ph < WS.phase_min) {
+                WS.phase_min = ph;
+            }
+            if (ph > WS.phase_max) {
+                WS.phase_max = ph;
+            }
+            ++WS.phase_n;
+        }
+    }
+    uint64_t age = 0;
+    const char *st = fc_thread_stage(0, &age);
+    for (int i = 0; i < WAKE_SNAP_SLOTS; ++i) {
+        if (WS.name[i] == st || WS.name[i] == NULL) {
+            WS.name[i] = st;
+            if (late) {
+                ++WS.late[i];
+            } else {
+                ++WS.ontime[i];
+            }
+            return;
+        }
+    }
+    ++WS.overflow;
+}
+
+void fc_imu_rt_wake_snapshot_print(void) {
+    printf("главный поток Refloat в момент пробуждения задачи датчика:\n");
+    printf("  %-30s %10s %10s\n", "вызов", "поздно", "вовремя");
+    for (int i = 0; i < WAKE_SNAP_SLOTS && WS.name[i]; ++i) {
+        printf("  %-30s %10" PRIu32 " %10" PRIu32 "\n", WS.name[i], WS.late[i], WS.ontime[i]);
+    }
+    if (WS.overflow) {
+        printf("  (не поместилось: %" PRIu32 ")\n", WS.overflow);
+    }
+    if (WS.phase_n) {
+        printf("фаза тика ядра 1 относительно ядра 0: mean %.0f мкс, min %" PRIu32 ", max %" PRIu32 "\n",
+               (double) WS.phase_sum / (double) WS.phase_n, WS.phase_min, WS.phase_max);
+    }
+    for (int k = 0; k < 2; ++k) {
+        if (!WS.n[k]) {
+            continue;
+        }
+        printf("  пробуждения %-8s n=%-6llu  от тика ядра 0: %6.0f мкс   от тика ядра 1: %6.0f мкс\n",
+               k ? "ПОЗДНИЕ" : "вовремя", (unsigned long long) WS.n[k],
+               (double) WS.d0_sum[k] / (double) WS.n[k], (double) WS.d1_sum[k] / (double) WS.n[k]);
+    }
+}
+
+void fc_imu_rt_wake_snapshot_reset(void) {
+    memset(&WS, 0, sizeof(WS));
+}
+
 static void imu_rt_task(void *arg) {
     (void) arg;
     esp_task_wdt_add(NULL);
 
     TickType_t next = xTaskGetTickCount();
 
+    // Ритм — от аппаратного таймера с прерыванием на ЭТОМ ядре (fc_rt_clock.h).
+    // Таймер запускается отсюда, а не из старта: прерывание размещается на
+    // ядре вызывающей задачи, а эта задача закреплена за ядром 1. Если таймер
+    // не поднялся, остаётся прежний ритм от тика — с известным дрожанием, но
+    // без остановки контура.
+    fc_rt_clock_subscribe(FC_RT_CLOCK_SLOT_IMU, xTaskGetCurrentTaskHandle());
+#if FC_DIAG_NO_RT_CLOCK
+    // Диагностический вариант для A/B (ТЗ v0.9I §15): ритм от тика.
+    bool hw_clock = false;
+#else
+    bool hw_clock = fc_rt_clock_start(1000000u / FC_IMU_RT_CONTROL_HZ);
+#endif
+
     while (R.run) {
-        vTaskDelayUntil(&next, FC_IMU_RT_POLL_TICKS);
+        if (hw_clock) {
+            // Таймаут в пять периодов: дольше ждать нельзя, иначе остановка
+            // таймера выглядела бы как тихо замёрзший контур. Супервизор
+            // увидит это по возрасту семпла, а счётчик — здесь.
+            (void) fc_rt_clock_wait(10);
+        } else {
+            vTaskDelayUntil(&next, FC_IMU_RT_POLL_TICKS);
+        }
+        fc_timing_tick(FC_TIMING_IMU_WAKE);
+#if FC_DIAG_LOOP_PROBES
+        wake_snapshot();
+#endif
 
         if (R.stall_ms) {
             // Задержка задачи чтения на известное время. Служит двум целям:
@@ -198,9 +377,30 @@ static void imu_rt_task(void *arg) {
 
         int64_t t0 = esp_timer_get_time();
         icm20948_sample_t s;
+        // Чужое время на ядре 1 внутри вызова (ТЗ v0.9I §2): счётчики FreeRTOS
+        // обновляются при снятии задачи с процессора, поэтому каждый отрезок
+        // чужой работы внутри вызова, закончившийся возвратом к этой задаче,
+        // попадает в разность целиком.
+#if FC_DIAG_LOOP_PROBES
+        uint32_t o0 = others_runtime();
+#endif
+        uint64_t w0 = fc_uptime_us();
         fc_timing_exec_begin(FC_TIMING_IMU_I2C);
         esp_err_t err = icm20948_read(&s);
         fc_timing_exec_end(FC_TIMING_IMU_I2C);
+        uint64_t w1 = fc_uptime_us();
+#if FC_DIAG_LOOP_PROBES
+        uint32_t o1 = others_runtime();
+#else
+        uint32_t o1 = 0, o0 = 0;
+#endif
+        ++R.i2c_calls;
+        R.i2c_wall_sum_us += w1 - w0;
+        {
+            uint32_t b = (uint32_t) ((w1 - w0) / 50u);
+            ++R.i2c_hist[b < FC_IMU_I2C_HIST_BINS ? b : FC_IMU_I2C_HIST_BINS - 1u];
+        }
+        R.i2c_others_sum_us += (uint64_t) (o1 - o0);
         int64_t t1 = esp_timer_get_time();
         uint32_t dur = (uint32_t) (t1 - t0);
         if (dur > R.max_read_us) {
@@ -342,13 +542,66 @@ static void imu_rt_task(void *arg) {
 
 // --------------------------------------------------------------- жизненный цикл
 
+// Создание драйвера датчика на ЯДРЕ РЕАЛЬНОГО ВРЕМЕНИ (ТЗ v0.9I §9, §16).
+//
+// Зачем. Драйвер I²C размещает обработчик прерывания на том ядре, которое
+// создало шину (esp_intr_alloc_intrstatus в i2c_master.c). Старт датчика
+// вызывается из app_main, то есть с ядра 0, — и прерывание оказывалось там
+// (подтверждено esp_intr_dump: I2C_EXT0 на CPU 0), а задача, ждущая
+// завершения транзакции, живёт на ядре 1. Каждое завершение будило её через
+// межъядерное уведомление.
+//
+// Измерено: развёртка по длине чтения с ядра 0 даёт пол 599 мкс на 14 байт
+// (провод ~408 + накладные ~193), а живое чтение с ядра 1 — около 912 мкс.
+// Разница ~313 мкс совпадает по порядку с ценой межъядерного пробуждения,
+// измеренной на v0.7D (236 мкс в среднем).
+//
+// Как. Временная задача, закреплённая за ядром 1, выполняет ту же
+// инициализацию и завершается; старт ждёт её. Порядок шагов не меняется.
+// Путь повторной инициализации и так исполняется внутри задачи датчика, то
+// есть на ядре 1, — после этого изменения оба пути дают одно и то же ядро.
+typedef struct {
+    const icm20948_config_t *cfg;
+    esp_err_t err;
+    SemaphoreHandle_t done;
+} InitOnRtCore;
+
+static void init_on_rt_core_task(void *arg) {
+    InitOnRtCore *c = (InitOnRtCore *) arg;
+    c->err = icm20948_init(c->cfg);
+    xSemaphoreGive(c->done);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t icm20948_init_on_rt_core(const icm20948_config_t *cfg) {
+    InitOnRtCore c = {.cfg = cfg, .err = ESP_FAIL, .done = xSemaphoreCreateBinary()};
+    if (!c.done) {
+        return ESP_ERR_NO_MEM;
+    }
+    // Стек с запасом: инициализация логирует и ждёт датчик.
+    if (xTaskCreatePinnedToCore(init_on_rt_core_task, "fc_imu_init", 4096, &c,
+                                tskIDLE_PRIORITY + 5, NULL, FC_CORE_REALTIME) != pdPASS) {
+        vSemaphoreDelete(c.done);
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreTake(c.done, portMAX_DELAY);
+    vSemaphoreDelete(c.done);
+    return c.err;
+}
+
 bool fc_imu_rt_start(void) {
     void (*cb)(float *, float *, float *, float) = R.callback;
     memset(&R, 0, sizeof(R));
     R.callback = cb;
 
     R.cfg = icm20948_default_config();
+#if FC_IMU_I2C_ISR_ON_CORE0
+    // Диагностический вариант для A/B (ТЗ v0.9I §9): прежнее размещение,
+    // прерывание I²C на ядре 0. Штатная сборка его не содержит.
     esp_err_t err = icm20948_init(&R.cfg);
+#else
+    esp_err_t err = icm20948_init_on_rt_core(&R.cfg);
+#endif
     // Драйвер мог разрешить адрес опросом — забираем фактическую конфигурацию.
     R.cfg = *icm20948_active_config();
 
@@ -398,6 +651,18 @@ bool fc_imu_rt_start(void) {
     // уходят в переполнение, отчего перцентиль показывал UINT32_MAX.
     // Транзакция выполняется ровно раз за итерацию, поэтому масштаб тот же.
     fc_timing_set_nominal(FC_TIMING_IMU_I2C, nominal_us);
+    fc_timing_set_nominal(FC_TIMING_IMU_WAKE, nominal_us);
+
+    // Зонды цикла (крючки тиков, чужое время внутри вызова I²C, перекрёстный
+    // снимок пробуждения) — только в диагностической сборке (ТЗ v0.9I §15).
+    // Измерено: вместе с аппаратным ритмом они съедают около 17 % ядра 1
+    // (простой 8.65 % против 26.15 % без них). Своё дело они сделали — с их
+    // помощью найдены обе причины этапа, — но в штатной сборке им не место.
+    // Сборка с зондами: idf.py -B build_probes -DFC_DIAG_LOOP_PROBES=1 build
+#if FC_DIAG_LOOP_PROBES
+    esp_register_freertos_tick_hook_for_cpu(tick_hook_core0, 0);
+    esp_register_freertos_tick_hook_for_cpu(tick_hook_core1, 1);
+#endif
 
     xTaskCreatePinnedToCore(
         imu_rt_task, "fc_imu_rt", FC_IMU_RT_STACK_BYTES, NULL, FC_PRIO_IMU, &R.task,

@@ -25,6 +25,9 @@
 #include "../../../compat/safety/fc_supervisor.h"
 #include "../../../compat/imu/fc_imu_pipeline.h"
 #include "../drivers/icm20948.h"
+#include "fc_rt_clock.h"
+#include "../../../compat/safety/fc_flash_policy.h"
+#include "../../../compat/diag/fc_i2c_fit.h"
 #include "fc_imu_source.h"
 #include "fc_imu_cal_store.h"
 #include "fc_can_bus.h"
@@ -44,8 +47,10 @@
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_intr_alloc.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include <fcntl.h>
@@ -57,6 +62,8 @@
 #include <unistd.h>
 
 // ============================================================ SAFE_READONLY
+
+static void print_task_table(void);
 
 static void cmd_status(void) {
     RefloatSnapshot s = refloat_facade_snapshot();
@@ -709,11 +716,9 @@ static void cmd_tasks(void) {
                    "", fc_thread_period_ticks(i), fc_thread_last_wake(i),
                    (uint32_t) xTaskGetTickCount());
         }    }
-#if CONFIG_FREERTOS_USE_STATS_FORMATTING_FUNCTIONS
-    static char buf[1024];
-    vTaskList(buf);
-    printf("\nname          state prio stack  num core\n%s", buf);
-#endif
+    // Без vTaskList (ТЗ v0.9I §19): измерено, что десять её вызовов дают пять
+    // пропущенных периодов контура с провалами до 6.8 мс. См. print_task_table.
+    print_task_table();
 }
 
 static void print_timing(FcTimingChannel ch) {
@@ -964,6 +969,15 @@ static void cmd_persist(void) {
                    ev[k].ok ? "успех" : "ОШИБКА");
         }
     }
+    FcFlashPolicyStats fp = fc_flash_policy_stats();
+    printf("отложенная запись (ТЗ v0.9I §12):\n");
+    printf("  ожидает         %s%s\n", fp.pending ? "ДА" : "нет",
+           fp.pending ? " — выполнится при первом DISARMED" : "");
+    printf("  просьб %llu, отложено эпизодов %llu, выполнено %llu, ошибок %llu\n",
+           (unsigned long long) fp.requested, (unsigned long long) fp.deferred,
+           (unsigned long long) fp.executed, (unsigned long long) fp.failed);
+    printf("  последняя запись %" PRIu32 " мкс, худшая %" PRIu32 " мкс\n", fp.last_duration_us,
+           fp.max_duration_us);
 }
 
 static void cmd_timing_reset(void) {
@@ -1749,7 +1763,55 @@ static void cmd_gain_scale(const char *arg) {
 // Считается по РАЗНОСТИ двух снимков, а не по абсолютным счётчикам: иначе
 // цифра была бы средним за всё время с загрузки и любой режим тонул бы в
 // истории.
-#define CPU_MAX_TASKS 24
+// Задачи перечисляются по ИМЕНАМ, а не через uxTaskGetSystemState (ТЗ v0.9I §19).
+// Та для каждой задачи побайтно сканирует стек в поисках водяного знака, а у
+// Refloat Main и Aux по 12 КБ. На приёмке один вызов этой команды после окна
+// совпал с зазором IMU 5620 мкс: диагностика сама рвала реальное время.
+// Здесь стек не сканируется вовсе: vTaskGetInfo с xGetFreeStackSpace = pdFALSE.
+static const char *const CPU_TASKS[] = {
+    "fc_imu_rt", "Refloat Main", "Refloat Aux", "fc_super", "fc_can_rx", "fc_log",
+    "fc_nvs",    "fc_console",   "fc_report",   "esp_timer", "ipc0",    "ipc1",
+};
+#define CPU_N (sizeof(CPU_TASKS) / sizeof(CPU_TASKS[0]) + 2u)  // + IDLE0, IDLE1
+
+static void cpu_sample(TaskHandle_t *h, uint32_t *rt) {
+    for (unsigned i = 0; i < CPU_N; ++i) {
+        rt[i] = 0;
+        if (!h[i]) {
+            continue;
+        }
+        TaskStatus_t st;
+        vTaskGetInfo(h[i], &st, pdFALSE, eRunning);
+        rt[i] = (uint32_t) st.ulRunTimeCounter;
+    }
+}
+
+
+// Таблица задач без остановки планировщика (ТЗ v0.9I §19).
+//
+// vTaskList и uxTaskGetSystemState для КАЖДОЙ задачи побайтно сканируют стек,
+// и делают это, пока планировщик остановлен. Измерено: десять вызовов прежней
+// команды tasks дали пять пропущенных периодов контура с провалами до 6.8 мс.
+// Здесь водяной знак считается по одной задаче через
+// uxTaskGetStackHighWaterMark: он читает память стека, не останавливая никого.
+static void print_task_table(void) {
+    static const char STATE[] = {'X', 'R', 'B', 'S', 'D', '?'};
+    printf("\nname             state prio  стек свободно  core\n");
+    const unsigned named = CPU_N - 2u;
+    for (unsigned i = 0; i < CPU_N; ++i) {
+        TaskHandle_t h = i < named ? xTaskGetHandle(CPU_TASKS[i])
+                                   : xTaskGetIdleTaskHandleForCore((BaseType_t) (i - named));
+        if (!h) {
+            continue;
+        }
+        eTaskState s = eTaskGetState(h);
+        BaseType_t core = xTaskGetCoreID(h);
+        printf("%-16s   %c   %3u   %8u B    %s\n", pcTaskGetName(h),
+               STATE[(unsigned) s < sizeof(STATE) ? (unsigned) s : sizeof(STATE) - 1u],
+               (unsigned) uxTaskPriorityGet(h), (unsigned) uxTaskGetStackHighWaterMark(h),
+               core == 0 ? "0" : (core == 1 ? "1" : "любое"));
+    }
+}
 
 static void cmd_cpu(const char *arg) {
     uint32_t window_ms = 2000;
@@ -1759,46 +1821,231 @@ static void cmd_cpu(const char *arg) {
             window_ms = v;
         }
     }
+    static TaskHandle_t h[CPU_N];
+    static uint32_t a[CPU_N], b[CPU_N];
+    const unsigned named = CPU_N - 2u;
+    for (unsigned i = 0; i < named; ++i) {
+        h[i] = xTaskGetHandle(CPU_TASKS[i]);
+    }
+    h[named] = xTaskGetIdleTaskHandleForCore(0);
+    h[named + 1u] = xTaskGetIdleTaskHandleForCore(1);
 
-    static TaskStatus_t a[CPU_MAX_TASKS], b[CPU_MAX_TASKS];
-    uint32_t t0 = 0, t1 = 0;
-    UBaseType_t na = uxTaskGetSystemState(a, CPU_MAX_TASKS, &t0);
+    uint64_t t0 = fc_uptime_us();
+    cpu_sample(h, a);
     vTaskDelay(pdMS_TO_TICKS(window_ms));
-    UBaseType_t nb = uxTaskGetSystemState(b, CPU_MAX_TASKS, &t1);
-
-    uint32_t total = t1 - t0;
-    if (na == 0 || nb == 0 || total == 0) {
-        printf("статистика времени недоступна\n");
+    cpu_sample(h, b);
+    uint64_t per_core = fc_uptime_us() - t0;
+    if (per_core == 0) {
         return;
     }
-    printf("доля процессора за %" PRIu32 " мс (сумма по ОБОИМ ядрам = 200 %%):\n", window_ms);
-    double idle[2] = {0.0, 0.0};
-    for (UBaseType_t i = 0; i < nb; ++i) {
-        uint32_t prev = 0;
-        for (UBaseType_t j = 0; j < na; ++j) {
-            if (a[j].xHandle == b[i].xHandle) {
-                prev = a[j].ulRunTimeCounter;
-                break;
-            }
+    printf("доля процессора за %" PRIu32 " мс (каждое ядро = 100 %%, стек не сканируется):\n",
+           window_ms);
+    for (unsigned i = 0; i < CPU_N; ++i) {
+        if (!h[i]) {
+            continue;
         }
-        uint32_t d = b[i].ulRunTimeCounter - prev;
-        double pct = 100.0 * (double) d / (double) total;
-        int core = (int) b[i].xCoreID;
-        if (core != 0 && core != 1) {
-            core = -1;
+        TaskStatus_t st;
+        vTaskGetInfo(h[i], &st, pdFALSE, eRunning);
+        double pct = 100.0 * (double) (b[i] - a[i]) / (double) per_core;
+        if (pct < 0.05) {
+            continue;
         }
-        if (!strncmp(b[i].pcTaskName, "IDLE", 4) && core >= 0) {
-            idle[core] = pct;
-        }
-        if (pct >= 0.05) {
-            printf("  %-16s ядро %-2s приоритет %2u  %6.2f %%\n", b[i].pcTaskName,
-                   core < 0 ? "любое" : (core ? "1" : "0"), (unsigned) b[i].uxCurrentPriority, pct);
-        }
+        int core = (int) st.xCoreID;
+        printf("  %-16s ядро %-5s приоритет %2u  %6.2f %%\n", st.pcTaskName,
+               (core == 0 || core == 1) ? (core ? "1" : "0") : "любое",
+               (unsigned) st.uxCurrentPriority, pct);
     }
     printf("  ------------------------------------------------\n");
-    printf("  простой ядра 0 %6.2f %%,  ядра 1 %6.2f %%\n", idle[0], idle[1]);
-    printf("  Простой около нуля означает, что ядро занято целиком: задача с\n");
-    printf("  низшим приоритетом на нём не получит процессор НИКОГДА.\n");
+    printf("  простой ядра 0 %6.2f %%,  ядра 1 %6.2f %%\n",
+           100.0 * (double) (b[named] - a[named]) / (double) per_core,
+           100.0 * (double) (b[named + 1u] - a[named + 1u]) / (double) per_core);
+}
+
+
+// ---------------------------------------------- зонд шины I²C (ТЗ v0.9I §3, §5, §9)
+//
+// Что меряется. Время вызова API чтения N байт при разных N. На проводе оно
+// растёт строго линейно: каждый байт — это 9 тактов SCL. Поэтому
+//
+//     T(N) = a + b·N
+//
+// где наклон b — время одного байта НА ПРОВОДЕ с учётом всего, что удлиняет
+// такт (в том числе медленных фронтов), а свободный член a — фиксированная
+// часть: три служебных байта (адрес+W, регистр, адрес+R), START, повторный
+// START, STOP и собственные накладные расходы драйвера.
+//
+// Почему это отвечает на вопрос без осциллографа. «Шина медленная» и «драйвер
+// дорогой» раньше были неотличимы: оба дают одни и те же 900 мкс. Здесь первое
+// меняет наклон, второе — только свободный член.
+//
+// Почему минимум, а не среднее. Шину делит задача датчика; если она держит
+// блокировку, вызов зонда ждёт, и это ожидание к проводу отношения не имеет.
+// Минимум из многих повторов — время вызова без чужого ожидания.
+#define PROBE_REPS 100
+#define PROBE_LENS 7
+
+static int probe_cmp(const void *a, const void *b) {
+    uint32_t x = *(const uint32_t *) a, y = *(const uint32_t *) b;
+    return x < y ? -1 : x > y;
+}
+
+// Результаты развёртки. Статические: зонд может исполняться в отдельной задаче
+// на другом ядре, а печатает их всегда консоль — печать из задачи с высоким
+// приоритетом на ядре реального времени сама исказила бы замер.
+static struct {
+    int ok;               // 0 — не начат, 1 — готов, <0 — отказ
+    esp_err_t err;
+    int core;
+    double mn[PROBE_LENS], med[PROBE_LENS];
+    uint32_t p90[PROBE_LENS], mx[PROBE_LENS];
+    SemaphoreHandle_t done;
+} PROBE;
+
+static const uint8_t PROBE_LEN_TAB[PROBE_LENS] = {1, 2, 4, 8, 14, 20, 26};
+
+static void probe_sweep(void) {
+    static uint32_t t[PROBE_REPS];
+    uint8_t buf[32];
+    PROBE.core = xPortGetCoreID();
+    for (int k = 0; k < PROBE_LENS; ++k) {
+        int ok = 0;
+        for (int r = 0; r < PROBE_REPS; ++r) {
+            uint32_t us = 0;
+            esp_err_t e = icm20948_probe_read(0x2D, buf, PROBE_LEN_TAB[k], &us);
+            if (e == ESP_ERR_INVALID_STATE) {
+                PROBE.ok = -1;
+                PROBE.err = e;
+                return;
+            }
+            if (e == ESP_OK) {
+                t[ok++] = us;
+            }
+            // Шина общая с задачей датчика: оставляем ей окно на каждом шаге.
+            vTaskDelay(1);
+        }
+        if (ok < PROBE_REPS / 2) {
+            PROBE.ok = -2;
+            return;
+        }
+        qsort(t, (size_t) ok, sizeof(t[0]), probe_cmp);
+        PROBE.mn[k] = t[0];
+        PROBE.med[k] = t[ok / 2];
+        PROBE.p90[k] = t[(ok * 9) / 10];
+        PROBE.mx[k] = t[ok - 1];
+    }
+    PROBE.ok = 1;
+}
+
+static void probe_task(void *arg) {
+    (void) arg;
+    probe_sweep();
+    xSemaphoreGive(PROBE.done);
+    vTaskDelete(NULL);
+}
+
+// i2c-probe [ядро]. Без аргумента — в задаче консоли (ядро 0). С аргументом —
+// в отдельной задаче, закреплённой за указанным ядром, с приоритетом между
+// Refloat Main (12) и задачей датчика (14): иначе на загруженном ядре 1 зонд
+// не получил бы процессор вовсе. Только для диагностики в LAB_SAFE.
+static void cmd_i2c_probe(const char *arg) {
+    icm20948_scl_timing_t tm;
+    icm20948_scl_timing(&tm);
+    printf("=== такт SCL из РЕГИСТРОВ периферии I2C0 ===========================\n");
+    printf("источник          %" PRIu32 " Гц (APB)\n", tm.source_hz);
+    printf("scl_low_period    %d   scl_high_period %d   scl_wait_high %d\n", tm.scl_low_period,
+           tm.scl_high_period, tm.scl_wait_high);
+    printf("фильтр SCL        %s, порог %d тактов;  фильтр SDA %s, порог %d\n",
+           tm.scl_filter_en ? "вкл" : "выкл", tm.scl_filter_thres, tm.sda_filter_en ? "вкл" : "выкл",
+           tm.sda_filter_thres);
+    printf("запрошено         %" PRIu32 " Гц\n", tm.requested_hz);
+    printf("по регистрам      %" PRIu32 " Гц   <- без учёта нарастания фронтов\n", tm.programmed_hz);
+
+    memset(&PROBE, 0, sizeof(PROBE));
+    if (arg && (*arg == '0' || *arg == '1')) {
+        int core = *arg - '0';
+        PROBE.done = xSemaphoreCreateBinary();
+        if (!PROBE.done || xTaskCreatePinnedToCore(probe_task, "fc_i2c_probe", 4096, NULL, 13, NULL,
+                                                   core) != pdPASS) {
+            printf("не удалось запустить зонд на ядре %d\n", core);
+            return;
+        }
+        xSemaphoreTake(PROBE.done, portMAX_DELAY);
+        vSemaphoreDelete(PROBE.done);
+    } else {
+        probe_sweep();
+    }
+    if (PROBE.ok == -1) {
+        printf("ОТКЛОНЕНО: банк датчика не 0 — зонд не будет переключать его сам\n");
+        return;
+    }
+    if (PROBE.ok != 1) {
+        printf("зонд прерван: слишком мало успешных чтений\n");
+        return;
+    }
+
+    printf("\n=== развёртка по длине чтения, ЯДРО %d (по %d повторов) ==============\n",
+           PROBE.core, PROBE_REPS);
+    for (int k = 0; k < PROBE_LENS; ++k) {
+        printf("  N=%2u байт   min %5.0f   p50 %5.0f   p90 %5" PRIu32 "   max %5" PRIu32 " мкс\n",
+               PROBE_LEN_TAB[k], PROBE.mn[k], PROBE.med[k], PROBE.p90[k], PROBE.mx[k]);
+    }
+
+    // Та же арифметика, что проверена тестами на хосте (tests/safety/test_i2c_fit.c).
+    FcI2cFit f = fc_i2c_fit(PROBE_LEN_TAB, PROBE.mn, PROBE_LENS);
+    if (!f.valid) {
+        printf("\nподгонка невозможна: данных недостаточно\n");
+        return;
+    }
+    printf("\n=== подгонка T(N) = a + b*N по минимумам ============================\n");
+    printf("наклон b          %.2f мкс на байт  (при 400 кГц было бы 22.50)\n", f.slope_us_per_byte);
+    printf("ЧАСТОТА НА ПРОВОДЕ %.0f Гц  (9 тактов на байт, с учётом фронтов)\n", f.wire_hz);
+    printf("свободный член a  %.0f мкс\n", f.intercept_us);
+    printf("  из них провод   ~%.0f мкс  (служебные 3 байта и START/rSTART/STOP)\n", f.fixed_wire_us);
+    printf("  накладные API   ~%.0f мкс  (драйвер, блокировки, прерывания)\n", f.overhead_us);
+    printf("худшее отклонение от прямой %.0f мкс — %s\n", f.max_residual_us,
+           f.linear ? "зависимость линейна, модель годна"
+                    : "НЕЛИНЕЙНО: в минимумы попало ожидание, наклон НЕ скорость провода");
+    printf("\nдля N=14 (реальное чтение): провод ~%.0f мкс, накладные ~%.0f мкс, всего %.0f мкс\n",
+           f.fixed_wire_us + 14 * f.slope_us_per_byte, f.overhead_us,
+           f.intercept_us + 14 * f.slope_us_per_byte);
+}
+
+
+// Таблица выделенных прерываний (ТЗ v0.9I §10, §16). Нужна, чтобы узнать, на
+// каком ядре обслуживается I²C: драйвер размещает обработчик на ядре, которое
+// создало шину, а шину создаёт старт задачи датчика — не сама задача.
+static void cmd_intr(void) {
+    esp_intr_dump(stdout);
+}
+
+
+static void cmd_i2c_split(void) {
+    FcImuI2cSplit sp = fc_imu_rt_i2c_split();
+    printf("вызов I²C в задаче датчика (ядро 1), вызовов %llu:\n", (unsigned long long) sp.calls);
+    printf("  настенное время          %7.1f мкс\n", sp.wall_mean_us);
+#if FC_DIAG_LOOP_PROBES
+    printf("  получили ДРУГИЕ задачи   %7.1f мкс  (Refloat Main, простой ядра 1, супервизор)\n",
+           sp.others_mean_us);
+    printf("  держала сама задача      %7.1f мкс\n", sp.own_mean_us);
+#else
+    printf("  раскладка по ядру — только в сборке с -DFC_DIAG_LOOP_PROBES=1\n");
+#endif
+    printf("  распределение настенного времени вызова:\n");
+    for (unsigned b = 0; b < FC_IMU_I2C_HIST_BINS; ++b) {
+        if (sp.hist[b] == 0) {
+            continue;
+        }
+        unsigned w = (unsigned) (sp.calls ? (50ull * sp.hist[b]) / sp.calls : 0);
+        printf("    %4u…%4u мкс %8" PRIu32 " ", b * 50u, (b + 1u) * 50u, sp.hist[b]);
+        for (unsigned k = 0; k < w; ++k) {
+            putchar('#');
+        }
+        putchar('\n');
+    }
+    printf("  Провод на 14 байт ~412 мкс. Если «другие» близко к нему — задача на\n");
+    printf("  проводе блокируется; если около нуля — держит процессор.\n");
+    fc_imu_rt_i2c_split_reset();
+    printf("  (счётчики сброшены)\n");
 }
 
 static void cmd_gain_noi(void) {
@@ -1830,6 +2077,23 @@ static void dispatch(const char *line) {
         cmd_imu();
     } else if (!strncmp(line, "cpu", 3) && (line[3] == 0 || line[3] == ' ')) {
         cmd_cpu(line[3] ? line + 4 : NULL);
+    } else if (!strcmp(line, "wake-snap")) {
+        FcRtClockStats rc = fc_rt_clock_stats();
+        printf("аппаратный ритм: %s, ядро %d, период %" PRIu32 " мкс, срабатываний %llu, "
+               "ожиданий без ритма %llu\n", rc.running ? "РАБОТАЕТ" : "НЕ ЗАПУЩЕН", rc.core,
+               rc.period_us, (unsigned long long) rc.alarms, (unsigned long long) rc.wait_timeouts);
+#if FC_DIAG_LOOP_PROBES
+        fc_imu_rt_wake_snapshot_print();
+        fc_imu_rt_wake_snapshot_reset();
+#else
+        printf("перекрёстный снимок — только в сборке с -DFC_DIAG_LOOP_PROBES=1\n");
+#endif
+    } else if (!strcmp(line, "i2c-split")) {
+        cmd_i2c_split();
+    } else if (!strcmp(line, "intr")) {
+        cmd_intr();
+    } else if (!strncmp(line, "i2c-probe", 9) && (line[9] == 0 || line[9] == ' ')) {
+        cmd_i2c_probe(line[9] ? line + 10 : NULL);
     } else if (!strcmp(line, "tasks")) {
         cmd_tasks();
     } else if (!strcmp(line, "sched")) {

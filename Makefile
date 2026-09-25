@@ -377,12 +377,17 @@ neg-one:
 
 E32_SRC := $(ROOT)/platform/esp32/main/fc_adc_safe.c \
            $(ROOT)/platform/esp32/main/fc_timing.c \
+           $(ROOT)/compat/diag/fc_cpu_account.c \
            $(ROOT)/tests/esp32/stubs/stubs.c \
            $(ROOT)/tests/esp32/test_esp32_platform.c
 E32_OBJ := $(patsubst %,$(OBJ)/e32_%.o,$(notdir $(basename $(E32_SRC))))
 E32_CFLAGS := $(BASE_CFLAGS) -I$(ROOT)/tests/esp32/stubs -DFLOATCORE_LAB_SAFE=1
 
 $(OBJ)/e32_%.o: $(ROOT)/platform/esp32/main/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(E32_CFLAGS) -MMD -MP -c $< -o $@
+
+$(OBJ)/e32_%.o: $(ROOT)/compat/diag/%.c
 	@mkdir -p $(OBJ)
 	$(CC) $(E32_CFLAGS) -MMD -MP -c $< -o $@
 

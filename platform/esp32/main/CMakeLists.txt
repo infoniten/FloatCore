@@ -2,9 +2,11 @@
 # Здесь НЕТ ни одного исходника Refloat: он собирается компонентом refloat,
 # у которого другой набор include-путей (см. комментарий в fc_platform.h).
 idf_component_register(
+    LDFRAGMENTS "i2c_iram.lf"
     SRCS
         "app_main.c"
         "fc_vesc_if.c"
+        "fc_rt_clock.c"
         "fc_imu_mock.c"
         "fc_imu_rt.c"
         "fc_imu_source.c"
@@ -32,6 +34,7 @@ idf_component_register(
         "../../../compat/safety/fc_command_watchdog.c"
         "../../../compat/safety/fc_battery_model.c"
         "../../../compat/safety/fc_motor_permit.c"
+        "../../../compat/safety/fc_flash_policy.c"
         "../../../compat/motor/fc_motor_model.c"
         "../../../compat/config/floatcore_limits.c"
         "../../../compat/imu/fc_ahrs.c"
@@ -46,6 +49,8 @@ idf_component_register(
         "../../../compat/motor/fc_dual_motor.c"
         "../../../compat/diag/fc_gap_trace.c"
         "../../../compat/diag/fc_shadow.c"
+        "../../../compat/diag/fc_i2c_fit.c"
+        "../../../compat/diag/fc_cpu_account.c"
         "../../../compat/vesc_protocol/packet.c"
     INCLUDE_DIRS "."
     PRIV_INCLUDE_DIRS
@@ -112,3 +117,23 @@ else()
                         "получено '${FLOATCORE_CAN_PROFILE}'")
 endif()
 message(STATUS "FloatCore: профиль CAN = ${FLOATCORE_CAN_PROFILE}")
+
+# Диагностический переключатель для A/B размещения прерывания I²C (ТЗ v0.9I §9).
+# Только для замера: `idf.py -B build_isr0 -DFC_IMU_I2C_ISR_ON_CORE0=1 build`.
+# Штатная сборка его не задаёт, и прерывание обслуживается на ядре 1, рядом с
+# задачей, которая его ждёт.
+# Диагностические переключатели для A/B бюджета ядра (ТЗ v0.9I §15). Штатная
+# сборка их не задаёт.
+if(FC_DIAG_NO_RT_CLOCK)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC FC_DIAG_NO_RT_CLOCK=1)
+    message(STATUS "FloatCore: ДИАГНОСТИКА — ритм от тика FreeRTOS")
+endif()
+if(FC_DIAG_LOOP_PROBES)
+    # Зонды цикла датчика дороги: ~17 % ядра 1 вместе с аппаратным ритмом.
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC FC_DIAG_LOOP_PROBES=1)
+    message(STATUS "FloatCore: ДИАГНОСТИКА — зонды в цикле датчика ВКЛЮЧЕНЫ")
+endif()
+if(FC_IMU_I2C_ISR_ON_CORE0)
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC FC_IMU_I2C_ISR_ON_CORE0=1)
+    message(STATUS "FloatCore: ДИАГНОСТИКА — прерывание I2C на ядре 0")
+endif()

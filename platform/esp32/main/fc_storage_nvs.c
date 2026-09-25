@@ -18,6 +18,9 @@
 
 #include "fc_platform.h"
 
+#include "../../../compat/safety/fc_flash_policy.h"
+#include "../../../compat/safety/fc_supervisor.h"
+
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -54,6 +57,7 @@ int fc_storage_capacity(void) {
 }
 
 bool fc_storage_init(void) {
+    fc_flash_policy_init();
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_LOGW(TAG, "NVS требует переинициализации (%s), стираю раздел", esp_err_to_name(err));
@@ -223,10 +227,25 @@ static void flush_task(void *arg) {
     (void) arg;
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(FC_STORAGE_FLUSH_MS / 3));
-        bool due = g_st.dirty && fc_uptime_us() - g_st.last_write_us >= FC_STORAGE_FLUSH_MS * 1000ULL;
-        if (g_st.commit_requested || due) {
-            g_st.commit_requested = false;
-            fc_storage_commit();
+        uint64_t now = fc_uptime_us();
+        bool due = g_st.dirty && now - g_st.last_write_us >= FC_STORAGE_FLUSH_MS * 1000ULL;
+        if ((g_st.commit_requested || due) && !fc_flash_policy_stats().pending) {
+            fc_flash_policy_request(now);
         }
+        g_st.commit_requested = false;
+
+        // Решение — В МОМЕНТ КОММИТА, а не записи в зеркало (ТЗ v0.9I §11, §12).
+        //
+        // До v0.9I здесь коммитили по таймеру, не спрашивая супервизор. Запрос,
+        // принятый в DISARMED за мгновение до перехода в READY, уходил во flash
+        // уже в READY или RUNNING и останавливал оба ядра на ~5.8 мс. Теперь
+        // такой запрос откладывается и выполняется при первом DISARMED.
+        FcFlashDecision d = fc_flash_policy_decide(fc_supervisor_config_write_allowed(), now);
+        if (d != FC_FLASH_EXECUTE) {
+            continue;
+        }
+        bool had_work = g_st.dirty;
+        bool ok = fc_storage_commit();
+        fc_flash_policy_report(ok, had_work ? g_st.stats.last_commit_us : 0u, fc_uptime_us());
     }
 }

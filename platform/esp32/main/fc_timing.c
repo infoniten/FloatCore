@@ -14,6 +14,8 @@
 
 #include "fc_platform.h"
 
+#include "../../../compat/diag/fc_cpu_account.h"
+
 #include "esp_timer.h"
 
 #include <stdbool.h>
@@ -28,9 +30,8 @@ typedef struct {
     FcTimingStats s;
     uint64_t last_us;
     bool has_prev;
-    uint64_t exec_begin_us;
-    uint64_t preempt_begin_us;
-    bool exec_open;
+    FcCpuWindow win;
+    uint8_t core;
     uint32_t bin_width_us;
     uint32_t bins[FC_TIMING_BINS + 1];       // последняя — переполнение
     uint32_t exec_bins[FC_TIMING_BINS + 1];  // шкала та же, но от 0 до 4×nominal
@@ -57,6 +58,7 @@ static const char *const kNames[FC_TIMING_COUNT] = {
     [FC_TIMING_CAN_RX] = "fc_can_rx",
     [FC_TIMING_LOG] = "fc_log",
     [FC_TIMING_IMU_I2C] = "i2c транзакция",
+    [FC_TIMING_IMU_WAKE] = "imu пробуждение",
 };
 
 uint64_t fc_uptime_us(void) {
@@ -170,47 +172,46 @@ void fc_timing_tick(FcTimingChannel ch) {
     bin_add(c->bins, c->bin_width_us, dt, &c->s.overflow);
 }
 
-// Суммарная измеренная занятость ядра реального времени. Инкрементируется в
-// конце КАЖДОЙ итерации любого канала, поэтому разность двух отсчётов есть
-// чужая работа, прошедшая между ними.
-static uint64_t g_core_busy_us;
+// Накопитель занятости — СВОЙ У КАЖДОГО ЯДРА (ТЗ v0.9I §15).
+//
+// До v0.9I он был один на систему. Пока все измеряемые задачи жили на ядре 1,
+// это было незаметно. Но в v0.9H на ядро 0 переехал вспомогательный поток
+// Refloat и добавились каналы CAN RX и журнала — и их работа вычиталась из
+// окон ядра 1, хотя работа на соседнем ядре идёт параллельно и никого на
+// ядре 1 не вытесняет. Каждая задача закреплена за ядром, поэтому ядро в
+// начале и в конце окна одно и то же.
+//
+// Сама арифметика окон вынесена в compat/diag/fc_cpu_account.c и проверена
+// тестами на хосте, в том числе на вложенное вытеснение.
+static FcCpuAccount g_core[2];
 
 void fc_timing_exec_begin(FcTimingChannel ch) {
     if (ch >= FC_TIMING_COUNT) {
         return;
     }
-    g_ch[ch].exec_begin_us = fc_uptime_us();
-    g_ch[ch].preempt_begin_us = g_core_busy_us;
-    g_ch[ch].exec_open = true;
+    FcChannel *c = &g_ch[ch];
+    c->core = (uint8_t) (fc_current_core() & 1);
+    fc_cpu_window_begin(&g_core[c->core], &c->win, fc_uptime_us());
 }
 
 void fc_timing_exec_end(FcTimingChannel ch) {
-    if (ch >= FC_TIMING_COUNT || !g_ch[ch].exec_open) {
+    if (ch >= FC_TIMING_COUNT) {
         return;
     }
     FcChannel *c = &g_ch[ch];
-    c->exec_open = false;
-    uint32_t dur = (uint32_t) (fc_uptime_us() - c->exec_begin_us);
-
-    // Разность берётся ДО собственного вклада, иначе итерация учла бы саму
-    // себя. Вклад добавляется ниже, уже после расчёта.
-    uint64_t preempt64 = g_core_busy_us - c->preempt_begin_us;
-    uint32_t preempt = preempt64 > dur ? dur : (uint32_t) preempt64;
-    uint32_t net = dur - preempt;
-    c->s.preempt_sum_us += preempt;
-    if (preempt > c->s.preempt_max_us) {
-        c->s.preempt_max_us = preempt;
+    FcCpuSample smp;
+    if (!fc_cpu_window_end(&g_core[c->core], &c->win, fc_uptime_us(), &smp)) {
+        return;
     }
-    c->s.net_sum_us += net;
-    if (net > c->s.net_max_us) {
-        c->s.net_max_us = net;
+    uint32_t dur = smp.wall_us;
+    c->s.preempt_sum_us += smp.preempt_us;
+    if (smp.preempt_us > c->s.preempt_max_us) {
+        c->s.preempt_max_us = smp.preempt_us;
     }
-    // В накопитель занятости идёт СОБСТВЕННОЕ время, а не настенное.
-    // Настенное уже содержит чужую работу внутри себя, и складывая его, мы
-    // считали бы одну и ту же работу столько раз, сколько каналов её
-    // накрыли. Проявилось это тем, что «вытеснение» главного потока Refloat
-    // выходило больше его же настенного времени итерации.
-    g_core_busy_us += net;
+    c->s.net_sum_us += smp.net_us;
+    if (smp.net_us > c->s.net_max_us) {
+        c->s.net_max_us = smp.net_us;
+    }
 
     ++c->s.exec_samples;
     c->s.exec_sum_us += dur;

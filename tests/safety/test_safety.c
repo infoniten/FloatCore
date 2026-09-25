@@ -81,6 +81,11 @@ static uint64_t bring_up(uint64_t t) {
     return t;
 }
 
+// Тот же подъём до DISARMED — для других файлов набора (test_flash_policy.c).
+uint64_t fc_test_bring_up(uint64_t t) {
+    return bring_up(t);
+}
+
 static void test_states(void) {
     printf("\n  \033[1m1. машина состояний supervisor\033[0m\n");
     uint64_t t = 1000000;
@@ -399,6 +404,9 @@ static void test_calibration_required_for_ready(void) {
 
 void test_shadow_all(void);
 void test_closed_loop_all(void);
+void test_flash_policy_all(void);
+void test_i2c_fit_all(void);
+void test_cpu_account_all(void);
 
 int main(void) {
     printf("\n\033[1mТесты ядра безопасности: Supervisor, Motor Gate, IMU health\033[0m\n");
@@ -420,6 +428,9 @@ int main(void) {
     test_limits_plumbing_all();
     test_shadow_all();
     test_closed_loop_all();
+    test_flash_policy_all();
+    test_i2c_fit_all();
+    test_cpu_account_all();
 
     printf("\n================================================================\n");
     if (g_fail == 0) {

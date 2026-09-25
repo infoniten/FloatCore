@@ -54,6 +54,11 @@ typedef enum {
     // задача датчика съедает 70 % ядра при 38 % учтённых — вся разница
     // приходится сюда (ТЗ v0.9H §8, §18).
     FC_TIMING_IMU_I2C,
+    // Пробуждение задачи датчика — отметка СРАЗУ после vTaskDelayUntil
+    // (ТЗ v0.9I §20). Каналы control и icm20948 read отмечают период ПОСЛЕ
+    // чтения I²C, и колебания длительности чтения выглядят у них как
+    // опоздания. Этот канал показывает, ровно ли задача просыпается.
+    FC_TIMING_IMU_WAKE,
     FC_TIMING_COUNT
 } FcTimingChannel;
 
@@ -109,6 +114,9 @@ typedef struct {
 } FcTimingStats;
 
 void fc_timing_reset(void);
+
+/** Номер ядра, на котором исполняется вызывающий код (0 или 1). */
+int fc_current_core(void);
 
 /**
  * Закрыть фазу загрузки: текущие счётчики уходят в снимок, новые считаются с
@@ -278,6 +286,24 @@ uint64_t fc_imu_rt_reinits(void);
 
 uint32_t fc_imu_rt_stack_watermark(void);
 
+// Раскладка вызова I²C по ядру (ТЗ v0.9I §2, §15). wall — настенное время
+// вызова; others — сколько процессора ядра 1 за это время получили ДРУГИЕ
+// задачи. Если задача датчика блокируется на проводе, others близко к времени
+// провода; если держит процессор — близко к нулю. Средние по всем вызовам с
+// последнего сброса.
+#define FC_IMU_I2C_HIST_BINS 40u   // по 50 мкс, 0…2000 мкс, последняя — всё выше
+typedef struct {
+    uint32_t hist[FC_IMU_I2C_HIST_BINS];
+    uint64_t calls;
+    double wall_mean_us;
+    double others_mean_us;
+    double own_mean_us;   // wall - others: процессор, который держала сама задача
+} FcImuI2cSplit;
+FcImuI2cSplit fc_imu_rt_i2c_split(void);
+void fc_imu_rt_i2c_split_reset(void);
+void fc_imu_rt_wake_snapshot_print(void);
+void fc_imu_rt_wake_snapshot_reset(void);
+
 void fc_imu_rt_inject_stall(int ms);
 
 #if FC_LAB_DIAGNOSTICS
@@ -318,6 +344,9 @@ void fc_imu_stress_print_log(void);
 size_t fc_thread_count(void);
 const char *fc_thread_stage(size_t i, uint64_t *age_us);
 uint32_t fc_thread_period_ticks(size_t i);
+struct tskTaskControlBlock;
+struct tskTaskControlBlock *fc_thread_handle(size_t i);
+struct tskTaskControlBlock *fc_supervisor_task_handle(void);
 uint32_t fc_thread_last_wake(size_t i);
 const char *fc_thread_name(size_t i);
 uint32_t fc_thread_stack_watermark(size_t i);
