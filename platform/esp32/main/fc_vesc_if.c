@@ -836,7 +836,7 @@ static bool if_store_eeprom_var(eeprom_var *v, int address) {
     mark("if_store_eeprom_var");
     // Политика записи проверяется здесь, до всякого обращения к носителю
     // (ТЗ v0.6A §24). Refloat получает честный false и печатает свою ошибку.
-    if (!fc_supervisor_config_write_allowed()) {
+    if (!fc_flash_write_allowed()) {
         fc_storage_note_rejected_write();
         return false;
     }
@@ -845,7 +845,7 @@ static bool if_store_eeprom_var(eeprom_var *v, int address) {
 
 static bool if_store_backup_data(void) {
     mark("if_store_backup_data");
-    if (!fc_supervisor_config_write_allowed()) {
+    if (!fc_flash_write_allowed()) {
         fc_storage_note_rejected_write();
         return false;
     }

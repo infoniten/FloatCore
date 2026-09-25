@@ -238,6 +238,7 @@ void fc_imu_rt_i2c_split_reset(void) {
 // собственному, её пробуждение будет прыгать ровно на эту разность фаз.
 static volatile uint64_t s_tick_us[2];
 
+#if FC_DIAG_LOOP_PROBES
 static void IRAM_ATTR tick_hook_core0(void) {
     s_tick_us[0] = (uint64_t) esp_timer_get_time();
 }
@@ -245,6 +246,7 @@ static void IRAM_ATTR tick_hook_core0(void) {
 static void IRAM_ATTR tick_hook_core1(void) {
     s_tick_us[1] = (uint64_t) esp_timer_get_time();
 }
+#endif
 
 static struct {
     // сколько прошло от тика каждого ядра до пробуждения, суммы по видам
@@ -259,6 +261,7 @@ static struct {
     uint64_t prev_us;
 } WS;
 
+#if FC_DIAG_LOOP_PROBES
 static void wake_snapshot(void) {
     uint64_t now = fc_uptime_us();
     uint64_t prev = WS.prev_us;
@@ -301,6 +304,7 @@ static void wake_snapshot(void) {
     }
     ++WS.overflow;
 }
+#endif
 
 void fc_imu_rt_wake_snapshot_print(void) {
     printf("главный поток Refloat в момент пробуждения задачи датчика:\n");

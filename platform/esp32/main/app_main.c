@@ -390,7 +390,7 @@ void app_main(void) {
     fc_supervisor_task_start();
     printf("[floatcore] supervisor: %s, запись конфигурации %s\n",
            fc_supervisor_state_name(fc_supervisor_state()),
-           fc_supervisor_config_write_allowed() ? "разрешена" : "запрещена");
+           fc_flash_write_allowed() ? "разрешена" : "запрещена");
 
     // 6. Отчёты и консоль.
     printf("[floatcore] config test value = %.3f (leds.status.brightness_headlights_off)\n",

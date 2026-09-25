@@ -46,7 +46,7 @@ void fc_print_safety_line(void) {
     printf("  footpad    %s\n", refloat_facade_footpad_name(rs.footpad_state));
     printf("  cfg_write  %s (принято=%llu отклонено=%llu коммитов=%llu, последний %" PRIu32
            " мкс, худший %" PRIu32 " мкс)\n",
-           fc_supervisor_config_write_allowed() ? "allowed" : "rejected",
+           fc_flash_write_allowed() ? "allowed" : "rejected",
            (unsigned long long) st.writes_accepted, (unsigned long long) st.writes_rejected,
            (unsigned long long) st.commits_done, st.last_commit_us, st.max_commit_us);
     printf("  motor      requested=%llu rejected(disarmed=%llu fault=%llu invalid=%llu) "

@@ -28,6 +28,7 @@
 #include "fc_rt_clock.h"
 #include "../../../compat/safety/fc_flash_policy.h"
 #include "../../../compat/diag/fc_i2c_fit.h"
+#include "../../../compat/can/fc_vesc_values.h"
 #include "fc_imu_source.h"
 #include "fc_imu_cal_store.h"
 #include "fc_can_bus.h"
@@ -126,7 +127,7 @@ static void cmd_supervisor(void) {
     printf("motor output      %s\n",
            fc_supervisor_motor_output_permitted() ? "РАЗРЕШЁН" : "запрещён");
     printf("config write      %s\n",
-           fc_supervisor_config_write_allowed() ? "разрешена" : "запрещена");
+           fc_flash_write_allowed() ? "разрешена" : "запрещена");
     printf("входы:\n");
     printf("  platform_init   %d\n", st.inputs.platform_initialized);
     printf("  config_valid    %d\n", st.inputs.config_valid);
@@ -594,6 +595,75 @@ static void cmd_can_diag(const char *args, bool hex) {
 }
 #endif  // FC_CAN_DIAG_TX_AVAILABLE
 
+// ------------------------------------------- телеметрия половин (ТЗ v0.9J §9, §11)
+//
+// Только чтение: COMM_GET_VALUES и COMM_GET_APPCONF из белого списка
+// диагностики. Между запросами выдерживается пауза: у диагностики ограничитель
+// частоты 200 мс, и запросы подряд на v0.9E упирались в него.
+#if FC_CAN_DIAG_TX_AVAILABLE
+typedef struct {
+    bool values_ok;
+    FcVescValues v;
+    bool timeout_ok;
+    FcVescAppTimeout t;
+} HalfTelemetry;
+
+static bool diag_with_retry(FcCanDiagRequest req, uint8_t id, uint8_t *buf, uint16_t cap,
+                            uint16_t *n) {
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        if (fc_can_bus_diag_request(req, id, 500, buf, cap, n)) {
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    return false;
+}
+
+static HalfTelemetry read_half(uint8_t id, bool with_timeout) {
+    static uint8_t buf[FC_CAN_DIAG_RX_MAX];
+    HalfTelemetry h;
+    memset(&h, 0, sizeof(h));
+    uint16_t n = 0;
+    if (diag_with_retry(FC_CAN_DIAG_VALUES, id, buf, sizeof(buf), &n)) {
+        h.v = fc_vesc_values_decode(buf, n);
+        h.values_ok = h.v.valid;
+    }
+    if (with_timeout) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        if (diag_with_retry(FC_CAN_DIAG_APPCONF, id, buf, sizeof(buf), &n)) {
+            h.t = fc_vesc_appconf_timeout(buf, n, id);
+            h.timeout_ok = h.t.valid;
+        }
+    }
+    return h;
+}
+
+static void print_half(uint8_t id, const HalfTelemetry *h) {
+    if (!h->values_ok) {
+        printf("  %u: телеметрия НЕ получена\n", id);
+    } else {
+        printf("  %u: %.1f В  ток %+.2f А  ERPM %+ld  скважность %+.3f  тахометр %ld  "
+               "отказ %s\n", id, (double) h->v.v_in, (double) h->v.current_motor_a,
+               (long) h->v.erpm, (double) h->v.duty, (long) h->v.tachometer,
+               h->v.has_fault ? fc_vesc_fault_name(h->v.fault_code) : "?");
+    }
+    if (h->timeout_ok) {
+        printf("       таймаут команды %lu мс, тормозной ток по таймауту %.2f А%s\n",
+               (unsigned long) h->t.timeout_ms, (double) h->t.timeout_brake_current_a,
+               h->t.timeout_brake_current_a == 0.0f ? " (выбег)" : "");
+    }
+}
+
+static void cmd_vesc_values(void) {
+    printf("телеметрия половин (только чтение):\n");
+    HalfTelemetry a = read_half(118, true);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    HalfTelemetry b = read_half(100, true);
+    print_half(118, &a);
+    print_half(100, &b);
+}
+#endif
+
 // Низкотемповая диагностическая сессия (ТЗ v0.7B §10, §20 шаг 10).
 //
 // Ни одного печатного символа внутри сессии: измерять тайминг и одновременно
@@ -836,7 +906,7 @@ static void cmd_config(void) {
     printf("custom config     %s\n", fc_config_registered() ? "зарегистрирован" : "НЕТ");
     printf("storage слов      %d (NVS)\n", fc_storage_capacity());
     printf("запись сейчас     %s (supervisor %s)\n",
-           fc_supervisor_config_write_allowed() ? "разрешена" : "ЗАПРЕЩЕНА",
+           fc_flash_write_allowed() ? "разрешена" : "ЗАПРЕЩЕНА",
            fc_supervisor_state_name(fc_supervisor_state()));
     printf("статистика        принято=%llu отклонено=%llu коммитов=%llu (ошибок %llu)\n",
            (unsigned long long) st.writes_accepted, (unsigned long long) st.writes_rejected,
@@ -875,7 +945,7 @@ static void cmd_ready(void) {
         printf("  причина: не выполнены условия или активен отказ — см. `supervisor`\n");
     }
     printf("  запись конфигурации теперь %s\n",
-           fc_supervisor_config_write_allowed() ? "разрешена" : "запрещена");
+           fc_flash_write_allowed() ? "разрешена" : "запрещена");
     printf("  выход на мотор: %s (в LAB_SAFE не разрешает ни одно состояние)\n",
            fc_supervisor_motor_output_permitted() ? "РАЗРЕШЁН" : "запрещён");
 }
@@ -884,7 +954,7 @@ static void cmd_disarm(void) {
     fc_supervisor_disarm(fc_uptime_us());
     printf("supervisor: состояние %s, запись конфигурации %s\n",
            fc_supervisor_state_name(fc_supervisor_state()),
-           fc_supervisor_config_write_allowed() ? "разрешена" : "запрещена");
+           fc_flash_write_allowed() ? "разрешена" : "запрещена");
 }
 
 static void cmd_fault_clear(void) {
@@ -941,7 +1011,7 @@ static void cmd_persist(void) {
     printf("persist: leds.status.brightness_headlights_off %.3f -> %.3f\n", (double) before,
            (double) next);
     printf("persist: политика записи сейчас %s (supervisor %s)\n",
-           fc_supervisor_config_write_allowed() ? "разрешает" : "ЗАПРЕЩАЕТ",
+           fc_flash_write_allowed() ? "разрешает" : "ЗАПРЕЩАЕТ",
            fc_supervisor_state_name(fc_supervisor_state()));
     bool ok = refloat_facade_config_save_test(next);
     printf("persist: set_cfg вернул %s\n", ok ? "true" : "false");
@@ -1157,7 +1227,7 @@ static void cmd_imu_cal_save(void) {
                fc_imu_detect_state_name(d.state));
         return;
     }
-    if (!fc_supervisor_config_write_allowed()) {
+    if (!fc_flash_write_allowed()) {
         printf("imu-cal-save: ОТКЛОНЕНО, запись разрешена только в DISARMED (сейчас %s)\n",
                fc_supervisor_state_name(fc_supervisor_state()));
         return;
@@ -1177,7 +1247,7 @@ static void cmd_imu_cal_save(void) {
 }
 
 static void cmd_imu_cal_clear(void) {
-    if (!fc_supervisor_config_write_allowed()) {
+    if (!fc_flash_write_allowed()) {
         printf("imu-cal-clear: ОТКЛОНЕНО, запись разрешена только в DISARMED (сейчас %s)\n",
                fc_supervisor_state_name(fc_supervisor_state()));
         return;
@@ -1414,60 +1484,156 @@ static void cmd_motor_reset(void) {
 }
 
 
-// ------------------------------------------- одношаговая команда (ТЗ v0.9G §11, §12)
+// ------------------------------------------- одношаговая команда (ТЗ v0.9J)
 //
-// Два шага намеренно. Подготовка снимает угол и команду Refloat, считает, что
-// именно уйдёт, и печатает чекпойнт. Отправка без действительного токена
-// отвергается. Смысл не в бюрократии: между «посмотреть, что получится» и
-// «сделать» должно стоять действие, которое нельзя совершить по инерции.
+// Одна пара кадров, 118 затем 100, без обновления. Путь ровно тот же, что у
+// контура: Motor Gate -> координатор -> транспорт -> обе половины. Источник —
+// EXPERIMENT, а не REFLOAT: контур балансировки через гейт по-прежнему не
+// проходит (бит REFLOAT в маске не ставится, сборка без
+// FLOATCORE_REFLOAT_REAL_MOTOR_LOOP). Величина и ЗНАК берутся из команды
+// Refloat, поэтому проверяется сквозной путь Refloat -> мотор, но непрерывного
+// контура нет: одна команда по явному действию оператора.
+//
+// Два шага намеренно. Подготовка проверяет всё и печатает чекпойнт §9;
+// отправка без действительного токена отвергается.
+
+#define ONESHOT_TTL_US 60000000ull
+#define ONESHOT_ENVELOPE_A 0.5f
+#define ONESHOT_MIN_ERR_DEG 0.2f   // ниже — ток Refloat около мёртвой зоны 0.38 А
+#define ONESHOT_MAX_ERR_DEG 2.0f   // выше — «большой наклон», §6
+
 static struct {
     bool valid;
     uint64_t prepared_us;
     float amps;
-    float pitch;
-    float refloat_a;
+    float raw_a;
+    float err_deg;
+    HalfTelemetry pre[2];
+    uint64_t pairs_before, partial_before;
+    uint64_t tx_before[2];
+    uint64_t gate_sent_before;
+    // результат отправки
+    bool fired;
+    uint64_t t_request, t_done;
+    uint32_t verdict;
 } ONESHOT;
 
-// Токен живёт минуту. Дольше — и доска может оказаться уже в другом положении,
-// а чекпойнт описывал бы прошлое.
-#define ONESHOT_TTL_US 60000000ull
+static bool check(bool ok, const char *what, int *fails) {
+    printf("  [%s] %s\n", ok ? "да " : "НЕТ", what);
+    if (!ok) {
+        ++*fails;
+    }
+    return ok;
+}
 
 static void cmd_oneshot_prep(void) {
-    RefloatShadowFields sh;
+    ONESHOT.valid = false;
+    int fails = 0;
+    // Статические: консоль однопоточна, а на стеке эти структуры вместе с
+    // printf уже однажды переполнили стек задачи (v0.9J, отчёт одношага).
+    static RefloatShadowFields sh;
     refloat_facade_shadow(&sh);
+    static RefloatGains g;
+    refloat_facade_gains(&g);
+    static FcSupervisorStatus ss;
+    ss = fc_supervisor_status();
+    static FcMotorExpStats es;
+    es = fc_motor_experiment_stats();
+    static FcLimitsSyncStatus ls;
+    ls = fc_limits_sync_status();
+    static FcFlashPolicyStats fp;
+    fp = fc_flash_policy_stats();
+    static FcTimingStats tc, tm, tw;
+    tc = fc_timing_get(FC_TIMING_CONTROL);
+    tm = fc_timing_get(FC_TIMING_MAIN);
+    tw = fc_timing_get(FC_TIMING_IMU_WAKE);
 
-    float refloat_a = sh.balance_current;
-    float amps;
-    if (!(refloat_a > 0.0f) && !(refloat_a < 0.0f)) {
-        printf("ОТКЛОНЕНО: команда Refloat равна нулю — знак не определён.\n");
-        printf("  Наклоните стойку так, чтобы появилась ошибка тангажа, и повторите.\n");
-        ONESHOT.valid = false;
+    float err = sh.setpoint - sh.balance_pitch;
+    float raw = sh.balance_current;
+    // Корректирующий знак: нос вниз (тангаж < setpoint) -> ошибка > 0 ->
+    // положительный ток -> верх колеса к носу. Никакой инверсии в этом пути нет.
+    int expected = err > 0.0f ? 1 : (err < 0.0f ? -1 : 0);
+    int got = raw > 0.0f ? 1 : (raw < 0.0f ? -1 : 0);
+    float amps = got > 0 ? ONESHOT_ENVELOPE_A : -ONESHOT_ENVELOPE_A;
+
+    printf("=== ПРОВЕРКИ ОДНОШАГА =========================================\n");
+    check(fabsf(g.kp - 4.0f) < 1e-4f && fabsf(g.kp2 - 0.12f) < 1e-4f,
+          "коэффициенты кандидата A: kp 4.000, kp2 0.120", &fails);
+    check(g.ki == 0.0f && g.ki_limit == 0.0f,
+          "интеграл как при теневой квалификации: ki 0, ki_limit 0", &fails);
+    check(sh.state == 3, "Refloat в RUNNING (иначе его команда не обновляется)", &fails);
+    check(ss.state != FC_SUP_FAULT && ss.faults == 0, "супервизор здоров, отказов нет", &fails);
+    check(fc_supervisor_last_imu_permit() == FC_IMU_PERMIT_OK, "политика IMU: OK", &fails);
+    check(fc_imu_rt_cal_status() == FC_IMU_CAL_VALID, "калибровка ориентации действительна", &fails);
+    check(fc_motor_experiment_armed(), "координатор вооружён оператором", &fails);
+    check(!es.running, "источник 500 Гц НЕ работает", &fails);
+    check(ls.applied && ls.common.current_max > 0.0f, "пределы ESC синхронизированы", &fails);
+    check(!fp.pending && !fc_storage_busy(NULL), "отложенных записей во flash нет", &fails);
+    check(tc.missed == 0 && tm.missed == 0 && tw.missed == 0,
+          "пропусков дедлайнов с последнего timing-reset нет", &fails);
+    check(fabsf(err) >= ONESHOT_MIN_ERR_DEG && fabsf(err) <= ONESHOT_MAX_ERR_DEG,
+          "ошибка тангажа в окне 0.2…2.0° (не большой наклон)", &fails);
+    check(fabsf(raw) >= ONESHOT_ENVELOPE_A, "команда Refloat не меньше 0.5 А (выше мёртвой зоны)",
+          &fails);
+    check(expected != 0 && got == expected, "ЗНАК команды Refloat корректирующий", &fails);
+
+    // Телеметрия и отказы обеих половин — последней, она занимает шину.
+    ONESHOT.pre[0] = read_half(118, true);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    ONESHOT.pre[1] = read_half(100, true);
+    for (int k = 0; k < 2; ++k) {
+        const HalfTelemetry *h = &ONESHOT.pre[k];
+        char what[160];
+        snprintf(what, sizeof(what), "половина %u: телеметрия есть, отказ NONE, таймаут прочитан",
+                 k ? 100 : 118);
+        check(h->values_ok && h->v.has_fault && h->v.fault_code == 0 && h->timeout_ok, what,
+              &fails);
+    }
+
+    printf("\n=== ЧЕКПОЙНТ §9 ===============================================\n");
+    printf("BUILD      профиль %s\n", FC_PROFILE_NAME);
+    printf("STATE      супервизор %s, координатор %s, Refloat %s\n",
+           fc_supervisor_state_name(ss.state), fc_motor_experiment_armed() ? "ВООРУЖЁН" : "не вооружён",
+           refloat_facade_state_name(sh.state));
+    printf("           замкнутый контур: %s; запросы Refloat в гейт отвергаются (разрешено %llu)\n",
+           FC_CLOSED_LOOP_AVAILABLE ? "собран, выключен" : "ОТСУТСТВУЕТ в сборке",
+           (unsigned long long) fc_motor_gate_stats().allowed_by_policy);
+    printf("BATTERY    118: %.1f В, 100: %.1f В  — сверить с мультиметром\n",
+           (double) ONESHOT.pre[0].v.v_in, (double) ONESHOT.pre[1].v.v_in);
+    printf("TACH       опорный тахометр прямо перед отправкой: 118 = %ld, 100 = %ld\n",
+           (long) ONESHOT.pre[0].v.tachometer, (long) ONESHOT.pre[1].v.tachometer);
+    printf("ANGLE      тангаж %+.3f°, balance_pitch %+.3f°, setpoint %+.3f°, ошибка %+.3f°\n",
+           (double) sh.pitch, (double) sh.balance_pitch, (double) sh.setpoint, (double) err);
+    printf("           угловая скорость %+.2f °/с\n", (double) sh.pitch_rate);
+    printf("COMMAND    Refloat %+.3f А;  предел ESC %+.2f/%+.2f А;  предел одношага ±%.2f А\n",
+           (double) raw, (double) ls.common.current_max, (double) ls.common.current_min,
+           (double) ONESHOT_ENVELOPE_A);
+    printf("           УЙДЁТ: 118 = %+.3f А, 100 = %+.3f А  (одна пара, одинаковая величина)\n",
+           (double) amps, (double) amps);
+    printf("DIRECTION  %s\n", amps > 0.0f ? "положительный ток: верх колеса К НОСУ (край без фанеры)"
+                                          : "отрицательный ток: верх колеса К ХВОСТУ (край с фанерой)");
+    printf("           наклон %s -> корректирующее направление %s\n",
+           err > 0.0f ? "нос ВНИЗ" : "нос ВВЕРХ", amps > 0.0f ? "к носу" : "к хвосту");
+    printf("TIMING     порядок 118 -> 100; разбег пары по v0.9G: p99 0 мкс, граница 1000\n");
+    printf("           таймаут команды ESC: 118 %lu мс, 100 %lu мс\n",
+           (unsigned long) ONESHOT.pre[0].t.timeout_ms, (unsigned long) ONESHOT.pre[1].t.timeout_ms);
+    printf("STOP       после пары НИЧЕГО не обновляется: каждая половина снимет ток сама по\n");
+    printf("           таймауту и отпустит колесо в выбег (тормозной ток по таймауту %.2f / %.2f А)\n",
+           (double) ONESHOT.pre[0].t.timeout_brake_current_a,
+           (double) ONESHOT.pre[1].t.timeout_brake_current_a);
+    printf("           физически: отключить питание батареи\n");
+
+    if (fails) {
+        printf("\nОТКАЗ: не выполнено условий — %d. Токен НЕ выдан.\n", fails);
         return;
     }
-    amps = refloat_a > 0.0f ? FC_MOTOR_ONESHOT_MAX_A : -FC_MOTOR_ONESHOT_MAX_A;
-
     ONESHOT.valid = true;
+    ONESHOT.fired = false;
     ONESHOT.prepared_us = fc_uptime_us();
     ONESHOT.amps = amps;
-    ONESHOT.pitch = sh.balance_pitch;
-    ONESHOT.refloat_a = refloat_a;
-
-    printf("=== ЧЕКПОЙНТ ОДНОШАГА =========================================\n");
-    printf("угол (balance_pitch)   %+.3f град,  setpoint %+.3f,  ошибка %+.3f\n",
-           (double) sh.balance_pitch, (double) sh.setpoint,
-           (double) (sh.setpoint - sh.balance_pitch));
-    printf("команда Refloat        %+.3f А  (теневая, к мотору не идёт)\n", (double) refloat_a);
-    printf("предел одношага        %.2f А\n", (double) FC_MOTOR_ONESHOT_MAX_A);
-    printf("УЙДЁТ НА КАЖДЫЙ МОТОР  %+.3f А   -> суммарный момент %+.3f Н·м\n", (double) amps,
-           (double) (amps * 0.8901f));
-    printf("направление            %s\n",
-           amps > 0.0f ? "положительный ток -> колесо к НОСУ (край без фанеры)"
-                       : "отрицательный ток -> колесо к ХВОСТУ (край с фанерой)");
-    printf("ожидаемое движение     короткий рывок, затем свободный выбег\n");
-    printf("watchdog               кадр ОДИН, повторов нет: ESC обязан снять момент\n");
-    printf("                       по своему таймауту 50 мс\n");
-    printf("токен действителен     60 с.  Отправить: motor-oneshot-fire\n");
-    printf("===============================================================\n");
+    ONESHOT.raw_a = raw;
+    ONESHOT.err_deg = err;
+    printf("\nВсе условия выполнены. Токен действителен 60 с. Отправить: motor-oneshot-fire\n");
 }
 
 static void cmd_oneshot_fire(void) {
@@ -1477,22 +1643,154 @@ static void cmd_oneshot_fire(void) {
     }
     if (fc_uptime_us() - ONESHOT.prepared_us > ONESHOT_TTL_US) {
         ONESHOT.valid = false;
-        printf("ОТКЛОНЕНО: токен просрочен. Чекпойнт описывал прошлое положение.\n");
+        printf("ОТКЛОНЕНО: токен просрочен — чекпойнт описывал прошлое положение.\n");
         return;
     }
-    // Токен одноразовый: гасится ДО отправки, чтобы повтор был невозможен
-    // даже если дальше что-то пойдёт не так.
+    // Условия, которые могли измениться за время ожидания, перепроверяются.
+    static RefloatShadowFields sh;
+    refloat_facade_shadow(&sh);
+    float err = sh.setpoint - sh.balance_pitch;
+    int expected = err > 0.0f ? 1 : -1;
+    int now_sign = sh.balance_current > 0.0f ? 1 : -1;
+    int prep_sign = ONESHOT.amps > 0.0f ? 1 : -1;
+    if (!fc_motor_experiment_armed() || fabsf(sh.balance_current) < ONESHOT_ENVELOPE_A ||
+        now_sign != prep_sign || expected != prep_sign) {
+        ONESHOT.valid = false;
+        printf("ОТКЛОНЕНО: с момента подготовки изменились вооружение, угол или знак.\n");
+        return;
+    }
+    // Токен одноразовый и гасится ДО отправки.
     ONESHOT.valid = false;
 
-    uint32_t verdict = 0;
-    uint64_t t0 = fc_uptime_us();
-    bool ok = fc_motor_experiment_oneshot(ONESHOT.amps, &verdict);
-    uint64_t dt = fc_uptime_us() - t0;
+    static FcMotorExpStats es;
+    es = fc_motor_experiment_stats();
+    ONESHOT.pairs_before = es.pairs_sent;
+    ONESHOT.partial_before = es.pairs_partial;
+    ONESHOT.tx_before[0] = es.tx_count[0];
+    ONESHOT.tx_before[1] = es.tx_count[1];
+    ONESHOT.gate_sent_before = fc_motor_gate_stats().physically_sent;
 
-    printf("одношаг: %s, %+.3f А, вердикт гейта %s, путь %llu мкс\n", ok ? "ОТПРАВЛЕН" : "ОТКЛОНЁН",
-           (double) ONESHOT.amps, fc_motor_gate_verdict_name((FcGateVerdict) verdict),
-           (unsigned long long) dt);
-    printf("  повторов не будет. Снятие момента — дело таймаута ESC.\n");
+    fc_can_status_capture_start(800);
+    uint32_t verdict = 0;
+    ONESHOT.t_request = fc_uptime_us();
+    bool ok = fc_motor_experiment_oneshot(ONESHOT.amps, &verdict);
+    ONESHOT.t_done = fc_uptime_us();
+    ONESHOT.verdict = verdict;
+    ONESHOT.fired = true;
+
+    static FcMotorExpStats e2;
+    e2 = fc_motor_experiment_stats();
+    printf("ОДНОШАГ %s: %+.3f А, вердикт гейта %s\n", ok ? "ОТПРАВЛЕН" : "НЕ ОТПРАВЛЕН",
+           (double) ONESHOT.amps, fc_motor_gate_verdict_name((FcGateVerdict) verdict));
+    printf("  T_request  %llu мкс\n", (unsigned long long) ONESHOT.t_request);
+    printf("  T_TX118    %llu мкс (+%llu), %s\n", (unsigned long long) e2.tx_us[0],
+           (unsigned long long) (e2.tx_us[0] - ONESHOT.t_request), e2.tx_ok[0] ? "ушёл" : "СБОЙ");
+    printf("  T_TX100    %llu мкс (+%llu), %s\n", (unsigned long long) e2.tx_us[1],
+           (unsigned long long) (e2.tx_us[1] - ONESHOT.t_request), e2.tx_ok[1] ? "ушёл" : "СБОЙ");
+    printf("  разбег пары %llu мкс\n", (unsigned long long) (e2.tx_us[1] - e2.tx_us[0]));
+    printf("  повторов не будет. Итог: через секунду motor-oneshot-report\n");
+}
+
+static void cmd_oneshot_report(void) {
+    if (!ONESHOT.fired) {
+        // Холостой прогон: весь путь печати и чтения телеметрии, без данных
+        // выстрела. Нужен, чтобы проверить отчёт до того, как он понадобится:
+        // в первом одношаге именно он упал, и данные выстрела были потеряны.
+        printf("ХОЛОСТОЙ ПРОГОН ОТЧЁТА: одношаг не выполнялся, числа ниже не о выстреле\n");
+    }
+    while (fc_can_status_capture_active()) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    static FcMotorExpStats e;
+    e = fc_motor_experiment_stats();
+    uint64_t pairs = e.pairs_sent - ONESHOT.pairs_before;
+    uint64_t partial = e.pairs_partial - ONESHOT.partial_before;
+    uint64_t tx118 = e.tx_count[0] - ONESHOT.tx_before[0];
+    uint64_t tx100 = e.tx_count[1] - ONESHOT.tx_before[1];
+    uint64_t gate = fc_motor_gate_stats().physically_sent - ONESHOT.gate_sent_before;
+
+    printf("=== ОТЧЁТ ОДНОШАГА ============================================\n");
+    printf("ПАРЫ       целиком %llu, частичных %llu; кадров 118: %llu, 100: %llu; гейт: %llu\n",
+           (unsigned long long) pairs, (unsigned long long) partial, (unsigned long long) tx118,
+           (unsigned long long) tx100, (unsigned long long) gate);
+    printf("           %s\n", (pairs == 1 && partial == 0 && tx118 == 1 && tx100 == 1)
+                                   ? "РОВНО ОДНА пара, второй нет"
+                                   : "ВНИМАНИЕ: число пар или кадров не равно одному");
+
+    static FcStatusSample cap[FC_STATUS_CAPTURE_MAX];
+    uint32_t n = fc_can_status_capture(cap, FC_STATUS_CAPTURE_MAX);
+    uint64_t t0 = e.tx_us[0];
+    printf("STATUS     %lu кадров за 800 мс после команды (время от T_TX118):\n", (unsigned long) n);
+    float max_i[2] = {0, 0};
+    int32_t max_erpm[2] = {0, 0};
+    int64_t first_after[2] = {-1, -1};
+    int64_t last_nonzero_i[2] = {-1, -1};
+    for (uint32_t i = 0; i < n; ++i) {
+        int k = cap[i].node == 118 ? 0 : 1;
+        int64_t dt = (int64_t) cap[i].t_us - (int64_t) t0;
+        printf("  %+7lld мкс  %u  ток %+.1f А  ERPM %+ld  скважность %+.3f\n", (long long) dt,
+               cap[i].node, (double) cap[i].current_a, (long) cap[i].erpm, (double) cap[i].duty);
+        if (dt >= 0 && first_after[k] < 0) {
+            first_after[k] = dt;
+        }
+        if (fabsf(cap[i].current_a) > fabsf(max_i[k])) {
+            max_i[k] = cap[i].current_a;
+        }
+        if (labs((long) cap[i].erpm) > labs((long) max_erpm[k])) {
+            max_erpm[k] = cap[i].erpm;
+        }
+        if (fabsf(cap[i].current_a) >= 0.05f) {
+            last_nonzero_i[k] = dt;
+        }
+    }
+    for (int k = 0; k < 2; ++k) {
+        printf("  %u: первый STATUS через %lld мкс; наибольший ток %+.1f А; ERPM до %+ld; "
+               "последний ненулевой ток %lld мкс\n", k ? 100 : 118, (long long) first_after[k],
+               (double) max_i[k], (long) max_erpm[k], (long long) last_nonzero_i[k]);
+    }
+
+    static HalfTelemetry post[2];
+    post[0] = read_half(118, false);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    post[1] = read_half(100, false);
+    for (int k = 0; k < 2; ++k) {
+        uint8_t id = k ? 100 : 118;
+        if (post[k].values_ok && ONESHOT.pre[k].values_ok) {
+            long d = (long) (post[k].v.tachometer - ONESHOT.pre[k].v.tachometer);
+            printf("ТАХОМЕТР   %u: %ld -> %ld, приращение %+ld (%s); отказ после: %s\n", id,
+                   (long) ONESHOT.pre[k].v.tachometer, (long) post[k].v.tachometer, d,
+                   d > 0 ? "вперёд, к носу" : (d < 0 ? "назад, к хвосту" : "НЕ сдвинулось"),
+                   post[k].v.has_fault ? fc_vesc_fault_name(post[k].v.fault_code) : "?");
+        } else {
+            printf("ТАХОМЕТР   %u: телеметрия после не получена\n", id);
+        }
+    }
+    printf("ОЖИДАЛОСЬ  %s\n", ONESHOT.amps > 0.0f ? "положительное приращение (к носу)"
+                                                  : "отрицательное приращение (к хвосту)");
+    static FcFlashPolicyStats fp;
+    fp = fc_flash_policy_stats();
+    printf("FLASH      ожидает %s, выполнено записей всего %llu (до одношага было учтено в prep)\n",
+           fp.pending ? "ДА" : "нет", (unsigned long long) fp.executed);
+
+    // Реальное время за окно (§14): счётчики с последнего timing-reset,
+    // который обязан стоять перед prep.
+    FcTimingChannel chs[4] = {FC_TIMING_CONTROL, FC_TIMING_MAIN, FC_TIMING_AUX, FC_TIMING_IMU_WAKE};
+    printf("REALTIME  ");
+    for (int i = 0; i < 4; ++i) {
+        static FcTimingStats t;
+        t = fc_timing_get(chs[i]);
+        printf(" %s missed %" PRIu32 ";", t.name, t.missed);
+    }
+    printf("\n");
+    printf("IMU        политика %s; супервизор %s\n",
+           fc_supervisor_last_imu_permit() == FC_IMU_PERMIT_OK ? "OK" : "НЕ OK",
+           fc_supervisor_state_name(fc_supervisor_state()));
+    // FcCanStats несёт таблицу идентификаторов с последними кадрами — больше
+    // килобайта. Именно она на стеке и переполнила его в первом одношаге.
+    static FcCanStats cs;
+    cs = fc_can_bus_stats();
+    printf("CAN        ошибок шины %llu, BUS_OFF %llu\n", (unsigned long long) cs.bus_error_count,
+           (unsigned long long) cs.bus_off_count);
 }
 
 #endif // FC_MOTOR_BACKEND_AVAILABLE
@@ -2114,6 +2412,8 @@ static void dispatch(const char *line) {
     } else if (!strcmp(line, "can-health")) {
         cmd_can_health();
 #if FC_CAN_DIAG_TX_AVAILABLE
+    } else if (!strcmp(line, "vesc-values")) {
+        cmd_vesc_values();
     } else if (!strncmp(line, "can-diag-hex ", 13)) {
         cmd_can_diag(line + 13, true);
     } else if (!strncmp(line, "can-diag ", 9)) {
@@ -2234,6 +2534,8 @@ static void dispatch(const char *line) {
         cmd_oneshot_prep();
     } else if (!strcmp(line, "motor-oneshot-fire")) {
         cmd_oneshot_fire();
+    } else if (!strcmp(line, "motor-oneshot-report")) {
+        cmd_oneshot_report();
     } else if (!strcmp(line, "motor-arm")) {
         cmd_motor_arm();
     } else if (!strcmp(line, "motor-disarm")) {
@@ -2287,6 +2589,11 @@ static void console_task(void *arg) {
 void fc_console_start(void) {
     setvbuf(stdin, NULL, _IONBF, 0);
     fcntl(fileno(stdin), F_SETFL, fcntl(fileno(stdin), F_GETFL) | O_NONBLOCK);
-    xTaskCreatePinnedToCore(console_task, "fc_console", 4096, NULL, FC_PRIO_CONSOLE, NULL,
+    // 8192, а не 4096 (ТЗ v0.9J): отчёт одношага с 4 КБ переполнил стек —
+    // аппаратная точка останова на конце стека поймала запись в printf с
+    // FcCanStats (таблица идентификаторов, больше килобайта) на стеке. Крупные
+    // структуры в одношаге теперь статические, а запас нужен и для printf с
+    // плавающей точкой. Ядро 0 при этом простаивает, свободной кучи ~120 КБ.
+    xTaskCreatePinnedToCore(console_task, "fc_console", 8192, NULL, FC_PRIO_CONSOLE, NULL,
                             FC_CORE_HOUSEKEEPING);
 }

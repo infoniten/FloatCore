@@ -407,6 +407,7 @@ void test_closed_loop_all(void);
 void test_flash_policy_all(void);
 void test_i2c_fit_all(void);
 void test_cpu_account_all(void);
+void test_vesc_values_all(void);
 
 int main(void) {
     printf("\n\033[1mТесты ядра безопасности: Supervisor, Motor Gate, IMU health\033[0m\n");
@@ -431,6 +432,7 @@ int main(void) {
     test_flash_policy_all();
     test_i2c_fit_all();
     test_cpu_account_all();
+    test_vesc_values_all();
 
     printf("\n================================================================\n");
     if (g_fail == 0) {

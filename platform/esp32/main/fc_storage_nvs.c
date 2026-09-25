@@ -20,6 +20,10 @@
 
 #include "../../../compat/safety/fc_flash_policy.h"
 #include "../../../compat/safety/fc_supervisor.h"
+#include "../../../compat/safety/fc_build_profile.h"
+#if FC_MOTOR_BACKEND_AVAILABLE
+#include "fc_motor_experiment.h"
+#endif
 
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -138,6 +142,18 @@ static void event_push(uint64_t start_us, uint32_t dur_us, bool ok) {
     }
 }
 
+bool fc_flash_write_allowed(void) {
+    if (!fc_supervisor_config_write_allowed()) {
+        return false;
+    }
+#if FC_MOTOR_BACKEND_AVAILABLE
+    if (fc_motor_experiment_armed()) {
+        return false;
+    }
+#endif
+    return true;
+}
+
 bool fc_storage_busy(uint64_t *since_us) {
     bool b = g_busy;
     if (since_us) {
@@ -240,7 +256,7 @@ static void flush_task(void *arg) {
         // принятый в DISARMED за мгновение до перехода в READY, уходил во flash
         // уже в READY или RUNNING и останавливал оба ядра на ~5.8 мс. Теперь
         // такой запрос откладывается и выполняется при первом DISARMED.
-        FcFlashDecision d = fc_flash_policy_decide(fc_supervisor_config_write_allowed(), now);
+        FcFlashDecision d = fc_flash_policy_decide(fc_flash_write_allowed(), now);
         if (d != FC_FLASH_EXECUTE) {
             continue;
         }

@@ -90,6 +90,10 @@ FcMcconfLimits fc_vesc_mcconf_limits(const uint8_t *payload, uint16_t len) {
     return r;
 }
 
+float fc_vesc_float32_auto(const uint8_t *b) {
+    return f32_auto(b);
+}
+
 float fc_vesc_torque_constant(uint8_t poles, float flux_linkage) {
     // Kt = 1.5 · пар полюсов · λ. Пар полюсов вдвое меньше числа полюсов,
     // отсюда 0.5 — ровно как в motor_data.c:106.

@@ -42,7 +42,7 @@ FcImuCalStatus fc_imu_cal_store_load(FcImuCalibration *out) {
 bool fc_imu_cal_store_save(const FcImuCalibration *c) {
     // Проверка политики здесь, а не у вызывающего: запись конфигурации вне
     // DISARMED запрещена независимо от того, кто её просит.
-    if (!fc_supervisor_config_write_allowed()) {
+    if (!fc_flash_write_allowed()) {
         fc_storage_note_rejected_write();
         ESP_LOGW(TAG, "запись калибровки отклонена: состояние %s",
                  fc_supervisor_state_name(fc_supervisor_state()));
@@ -66,7 +66,7 @@ bool fc_imu_cal_store_save(const FcImuCalibration *c) {
 }
 
 bool fc_imu_cal_store_clear(void) {
-    if (!fc_supervisor_config_write_allowed()) {
+    if (!fc_flash_write_allowed()) {
         fc_storage_note_rejected_write();
         return false;
     }

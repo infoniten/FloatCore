@@ -3,6 +3,7 @@
 #if FC_CAN_RX_AVAILABLE
 
 #include "fc_platform.h"
+#include "../../../compat/can/fc_vesc_values.h"
 
 #include "../../../compat/can/fc_vesc_can.h"
 
@@ -99,6 +100,45 @@ const char *fc_can_bus_state_name(uint32_t state) {
     }
 }
 
+static struct {
+    FcStatusSample latest[2];
+    bool have[2];
+    FcStatusSample buf[FC_STATUS_CAPTURE_MAX];
+    volatile uint32_t n;
+    volatile bool capturing;
+    volatile uint64_t until_us;
+} S1;
+
+void fc_can_status_capture_start(uint32_t duration_ms) {
+    S1.capturing = false;
+    S1.n = 0;
+    S1.until_us = fc_uptime_us() + (uint64_t) duration_ms * 1000ull;
+    S1.capturing = true;
+}
+
+bool fc_can_status_capture_active(void) {
+    return S1.capturing && fc_uptime_us() <= S1.until_us;
+}
+
+uint32_t fc_can_status_capture(FcStatusSample *out, uint32_t max) {
+    uint32_t n = S1.n < max ? S1.n : max;
+    for (uint32_t i = 0; i < n; ++i) {
+        out[i] = S1.buf[i];
+    }
+    return n;
+}
+
+bool fc_can_status_latest(uint8_t node, FcStatusSample *out) {
+    int k = node == 118u ? 0 : (node == 100u ? 1 : -1);
+    if (k < 0 || !S1.have[k]) {
+        return false;
+    }
+    if (out) {
+        *out = S1.latest[k];
+    }
+    return true;
+}
+
 static void account(const twai_message_t *m, uint64_t now) {
     ++C.st.frames_total;
     if (m->extd) {
@@ -112,6 +152,25 @@ static void account(const twai_message_t *m, uint64_t now) {
     uint8_t dlc = m->data_length_code <= 8 ? m->data_length_code : 8;
     ++C.st.dlc_hist[dlc];
     C.st.last_frame_us = now;
+
+    // Телеметрия половин: разбор STATUS и захват после одношага (v0.9J §11).
+    if (m->extd && ((m->identifier >> 8) & 0xFFu) == FC_CAN_PACKET_STATUS) {
+        uint8_t node = (uint8_t) (m->identifier & 0xFFu);
+        int k = node == 118u ? 0 : (node == 100u ? 1 : -1);
+        FcVescStatus1 st = fc_vesc_status1_decode(m->data, dlc);
+        if (k >= 0 && st.valid) {
+            FcStatusSample smp = {now, node, st.erpm, st.current_a, st.duty};
+            S1.latest[k] = smp;
+            S1.have[k] = true;
+            if (S1.capturing) {
+                if (now > S1.until_us) {
+                    S1.capturing = false;
+                } else if (S1.n < FC_STATUS_CAPTURE_MAX) {
+                    S1.buf[S1.n++] = smp;
+                }
+            }
+        }
+    }
 
     // Таблица по идентификаторам. Линейный поиск: идентификаторов единицы, а
     // хеш здесь усложнил бы код без выигрыша.

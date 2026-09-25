@@ -32,6 +32,9 @@
  */
 float fc_vesc_torque_constant(uint8_t poles, float flux_linkage);
 
+/** buffer_get_float32_auto из bldc/util/buffer.c — нестандартная упаковка float. */
+float fc_vesc_float32_auto(const uint8_t *b);
+
 typedef struct {
     float current_max;     // l_current_max, А
     float current_min;     // l_current_min, А (отрицательное)

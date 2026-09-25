@@ -88,6 +88,14 @@ typedef struct {
     uint32_t path_p99_us;
     uint32_t path_p999_us;
 
+    // След передачи по половинам (ТЗ v0.9J §10): время, величина и результат
+    // последнего кадра, ушедшего в шину, и сколько кадров ушло всего. Индекс
+    // 0 — половина 118, 1 — половина 100; порядок передачи тот же.
+    uint64_t tx_us[2];
+    float tx_amps[2];
+    bool tx_ok[2];
+    uint64_t tx_count[2];
+
     uint32_t inject_mask;
     uint32_t last_deny_mask;
     uint32_t last_gate_verdict;

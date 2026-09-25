@@ -26,6 +26,7 @@ idf_component_register(
         "fc_motor_experiment.c"
         "fc_limits_sync.c"
         "../../../compat/can/fc_vesc_mcconf.c"
+        "../../../compat/can/fc_vesc_values.c"
         "../drivers/icm20948.c"
         "../../../compat/safety/fc_supervisor.c"
         "../../../compat/safety/fc_motor_gate.c"

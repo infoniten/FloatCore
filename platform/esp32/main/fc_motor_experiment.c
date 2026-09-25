@@ -59,8 +59,16 @@ static bool tx_half(uint8_t half, float amps, void *ctx) {
     }
     uint8_t id = (half == FC_DUAL_A) ? ID_A : ID_B;
     bool ok = fc_can_bus_motor_send_current(id, amps);
+    uint64_t now = fc_uptime_us();
     if (ok) {
-        E.st.last_tx_us = fc_uptime_us();
+        E.st.last_tx_us = now;
+    }
+    int k = half == FC_DUAL_A ? 0 : 1;
+    E.st.tx_us[k] = now;
+    E.st.tx_amps[k] = amps;
+    E.st.tx_ok[k] = ok;
+    if (ok) {
+        ++E.st.tx_count[k];
     }
     return ok;
 }
