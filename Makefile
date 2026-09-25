@@ -60,6 +60,8 @@ SAFETY_TESTS_BIN := $(BIN)/safety_tests
 DIAG_TESTS_BIN := $(BIN)/can_diag_tests
 HOST_TESTS_BIN := $(BIN)/refloat_host_tests
 PROTO_TESTS_BIN := $(BIN)/protocol_tests
+MOTOR_TESTS_BIN := $(BIN)/test_motor_transport
+CL_TESTS_BIN := $(BIN)/test_closed_loop_burst
 HOST_BIN := $(BIN)/floatcore_host
 
 .PHONY: all test test-all integration gen clean host host-tests protocol-tests esp32-tests esp32 safety-tests can-negative-test motor-tests
@@ -180,7 +182,7 @@ $(HOST_BIN): $(FH_OBJ)
 
 # --------------------------------------------------------------------- запуск
 
-test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN) $(DIAG_TESTS_BIN) $(MOTOR_TESTS_BIN)
+test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN) $(DIAG_TESTS_BIN) $(MOTOR_TESTS_BIN) $(CL_TESTS_BIN)
 	@echo ""
 	$(PROTO_TESTS_BIN)
 	@echo ""
@@ -193,6 +195,7 @@ test: $(PROTO_TESTS_BIN) $(HOST_TESTS_BIN) $(ESP32_TESTS_BIN) $(SAFETY_TESTS_BIN
 	$(DIAG_TESTS_BIN)
 	@echo ""
 	$(MOTOR_TESTS_BIN)
+	$(CL_TESTS_BIN)
 
 # Интеграционный прогон поднимает FloatCore Host и говорит с ним по настоящему
 # протоколу VESC — то же, что делает VESC Tool, только без GUI.
@@ -279,7 +282,6 @@ MOTOR_OBJ := $(patsubst %,$(OBJ)/mot_%.o,$(notdir $(basename $(MOTOR_SRC))))
 MOTOR_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_MOTOR_EXPERIMENTAL=1 \
                 -DFLOATCORE_MOTOR_EXPERIMENTAL_WHEEL_OFF_GROUND=1 \
                 -DFLOATCORE_CAN_ACTIVE_MOTOR=1
-MOTOR_TESTS_BIN := $(BIN)/test_motor_transport
 
 $(OBJ)/mot_%.o: $(ROOT)/compat/can/%.c
 	@mkdir -p $(OBJ)
@@ -294,6 +296,42 @@ $(MOTOR_TESTS_BIN): $(MOTOR_OBJ)
 	$(CC) $^ -lm -o $@
 
 motor-tests: $(MOTOR_TESTS_BIN)
+
+
+# ------------------------- тесты прогона замкнутого контура (host, EXP + контур)
+#
+# Четвёртый профиль. Код прогона существует только с
+# FLOATCORE_REFLOAT_REAL_MOTOR_LOOP; проверить срок и зажатие можно лишь в
+# такой сборке, и проверить их нужно ДО того, как ток пойдёт в мотор.
+CL_SRC := $(wildcard $(ROOT)/compat/safety/*.c) $(wildcard $(ROOT)/compat/imu/*.c) \
+          $(wildcard $(ROOT)/compat/log/*.c) $(ROOT)/compat/config/floatcore_limits.c \
+          $(ROOT)/tests/closedloop/test_burst.c
+CL_OBJ := $(patsubst %,$(OBJ)/cl_%.o,$(notdir $(basename $(CL_SRC))))
+CL_CFLAGS := $(BASE_CFLAGS) -DFLOATCORE_MOTOR_EXPERIMENTAL=1 \
+             -DFLOATCORE_MOTOR_EXPERIMENTAL_WHEEL_OFF_GROUND=1 \
+             -DFLOATCORE_CAN_ACTIVE_MOTOR=1 -DFLOATCORE_REFLOAT_REAL_MOTOR_LOOP=1
+
+$(OBJ)/cl_%.o: $(ROOT)/compat/safety/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(CL_CFLAGS) -MMD -MP -c $< -o $@
+$(OBJ)/cl_%.o: $(ROOT)/compat/imu/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(CL_CFLAGS) -MMD -MP -c $< -o $@
+$(OBJ)/cl_%.o: $(ROOT)/compat/log/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(CL_CFLAGS) -MMD -MP -c $< -o $@
+$(OBJ)/cl_%.o: $(ROOT)/compat/config/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(CL_CFLAGS) -MMD -MP -c $< -o $@
+$(OBJ)/cl_%.o: $(ROOT)/tests/closedloop/%.c
+	@mkdir -p $(OBJ)
+	$(CC) $(CL_CFLAGS) -MMD -MP -c $< -o $@
+
+$(CL_TESTS_BIN): $(CL_OBJ)
+	@mkdir -p $(BIN)
+	$(CC) $^ -lm -o $@
+
+closed-loop-tests: $(CL_TESTS_BIN)
 
 # ------------------------- тесты диагностического CAN (host, ACTIVE_DIAG)
 #

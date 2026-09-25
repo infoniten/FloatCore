@@ -58,7 +58,8 @@ typedef enum {
     FC_GATE_REJECTED_FAULT,    // supervisor в FAULT
     FC_GATE_REJECTED_INVALID,  // NaN/Inf или значение вне допустимого диапазона
     FC_GATE_REJECTED_NO_BACKEND, // backend отсутствует (LAB_SAFE)
-    FC_GATE_REJECTED_ORIGIN      // источник не допущен в этом профиле
+    FC_GATE_REJECTED_ORIGIN,     // источник не допущен в этом профиле
+    FC_GATE_REJECTED_DEADLINE    // срок прогона замкнутого контура истёк (v0.9K)
 } FcGateVerdict;
 
 typedef struct {
@@ -100,19 +101,34 @@ typedef struct {
 #define FC_GATE_ALLOWED_ORIGINS_V09A (1u << FC_MOTOR_ORIGIN_EXPERIMENT)
 
 #if FC_CLOSED_LOOP_AVAILABLE
-/**
- * Впустить источник REFLOAT в маску гейта (ТЗ v0.9G §13).
- *
- * Это ЕДИНСТВЕННЫЙ способ, которым контур балансировки может дойти до
- * backend-а. По умолчанию выключено, и включение действует только в текущем
- * сеансе: перезагрузка возвращает выключенное состояние.
- *
- * Само по себе включение тягу не разрешает. Дальше стоят ещё две двери:
- * супервизор обязан разрешать выход (fc_supervisor_motor_output_permitted) и
- * координатор обязан быть вооружён.
- */
-void fc_motor_gate_set_closed_loop(bool on);
-bool fc_motor_gate_closed_loop(void);
+// Прогон замкнутого контура (ТЗ v0.9K §4, §7).
+//
+// Единственный способ впустить источник REFLOAT в гейт, и он работает только
+// со СРОКОМ. Функция v0.9G, ставившая бит REFLOAT без срока, удалена.
+//
+// Пока прогон идёт, гейт на КАЖДОМ запросе REFLOAT:
+//   * проверяет срок; по истечении снимает бит REFLOAT и отвечает
+//     REJECTED_DEADLINE — повторного старта без нового вооружения нет;
+//   * зажимает величину оболочкой ±envelope — единственный явный слой
+//     зажатия; сколько раз он сработал, считается.
+//
+// Остальные двери на месте: супервизор обязан быть в RUNNING, координатор —
+// вооружён.
+bool fc_motor_gate_arm_burst(uint64_t deadline_us, float envelope_a);
+void fc_motor_gate_revoke_burst(void);
+
+typedef struct {
+    bool active;
+    uint64_t deadline_us;
+    float envelope_a;
+    uint64_t allowed;          // запросов REFLOAT, прошедших гейт
+    uint64_t clamped;          // из них зажатых оболочкой
+    uint64_t rejected_deadline;
+    float last_requested;
+    float last_delivered;      // после зажатия
+} FcGateBurstStats;
+
+FcGateBurstStats fc_motor_gate_burst_stats(void);
 #endif
 
 void fc_motor_gate_init(void);

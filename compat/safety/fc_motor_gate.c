@@ -38,16 +38,36 @@ void fc_motor_gate_set_allowed_origins(uint32_t mask) {
 }
 
 #if FC_CLOSED_LOOP_AVAILABLE
-void fc_motor_gate_set_closed_loop(bool on) {
-    if (on) {
-        G.allowed_origins |= (1u << FC_MOTOR_ORIGIN_REFLOAT);
-    } else {
-        G.allowed_origins &= ~(1u << FC_MOTOR_ORIGIN_REFLOAT);
+static struct {
+    uint64_t deadline_us;
+    float envelope_a;
+    FcGateBurstStats st;
+} B;
+
+bool fc_motor_gate_arm_burst(uint64_t deadline_us, float envelope_a) {
+    // Оболочка строго положительна и не выше предела ESC на торможении: иначе
+    // её обрезал бы ESC, и слой зажатия перестал бы быть единственным.
+    if (!(envelope_a > 0.0f) || envelope_a > 3.0f || deadline_us == 0) {
+        return false;
     }
+    memset(&B.st, 0, sizeof B.st);
+    B.deadline_us = deadline_us;
+    B.envelope_a = envelope_a;
+    B.st.active = true;
+    B.st.deadline_us = deadline_us;
+    B.st.envelope_a = envelope_a;
+    G.allowed_origins |= (1u << FC_MOTOR_ORIGIN_REFLOAT);
+    return true;
 }
 
-bool fc_motor_gate_closed_loop(void) {
-    return (G.allowed_origins & (1u << FC_MOTOR_ORIGIN_REFLOAT)) != 0u;
+void fc_motor_gate_revoke_burst(void) {
+    G.allowed_origins &= ~(1u << FC_MOTOR_ORIGIN_REFLOAT);
+    B.deadline_us = 0;
+    B.st.active = false;
+}
+
+FcGateBurstStats fc_motor_gate_burst_stats(void) {
+    return B.st;
 }
 #endif
 
@@ -137,6 +157,33 @@ FcGateVerdict fc_motor_gate_request_from(FcMotorOrigin origin, FcMotorRequestKin
         return FC_GATE_REJECTED_ORIGIN;
     }
 
+#if FC_CLOSED_LOOP_AVAILABLE
+    // 3b. Прогон замкнутого контура: срок и оболочка (v0.9K §4, §7).
+    if (origin == FC_MOTOR_ORIGIN_REFLOAT) {
+        if (now_us >= B.deadline_us) {
+            // Срок истёк: гейт отзывает прогон САМ, не дожидаясь супервизора.
+            fc_motor_gate_revoke_burst();
+            ++B.st.rejected_deadline;
+            ++G.stats.rejected_origin;
+            return FC_GATE_REJECTED_DEADLINE;
+        }
+        if (kind != FC_MOTOR_REQ_CURRENT) {
+            ++G.stats.rejected_invalid;
+            return FC_GATE_REJECTED_INVALID;
+        }
+        B.st.last_requested = value;
+        if (value > B.envelope_a) {
+            value = B.envelope_a;
+            ++B.st.clamped;
+        } else if (value < -B.envelope_a) {
+            value = -B.envelope_a;
+            ++B.st.clamped;
+        }
+        B.st.last_delivered = value;
+        ++B.st.allowed;
+    }
+#endif
+
     ++G.stats.allowed_by_policy;
 
     // 4. Даже когда политика разрешила, отправлять может быть некому.
@@ -205,6 +252,8 @@ const char *fc_motor_gate_verdict_name(FcGateVerdict v) {
         return "rejected_no_backend";
     case FC_GATE_REJECTED_ORIGIN:
         return "rejected_origin";
+    case FC_GATE_REJECTED_DEADLINE:
+        return "rejected_deadline";
     default:
         return "?";
     }

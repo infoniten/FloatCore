@@ -448,7 +448,19 @@ bool fc_can_bus_diag_request(FcCanDiagRequest req, uint8_t target_id, uint32_t t
     C.awaiting = true;
 
     uint64_t t0 = fc_uptime_us();
-    if (!transmit_whitelisted(&f, 50)) {
+    bool sent = transmit_whitelisted(&f, 50);
+    uint32_t call_us = (uint32_t) (fc_uptime_us() - t0);
+    C.dst.tx_call_last_us = call_us;
+    C.dst.tx_call_core = fc_current_core();
+    if (C.dst.tx_call_n == 0 || call_us < C.dst.tx_call_min_us) {
+        C.dst.tx_call_min_us = call_us;
+    }
+    if (call_us > C.dst.tx_call_max_us) {
+        C.dst.tx_call_max_us = call_us;
+    }
+    ++C.dst.tx_call_n;
+    C.dst.tx_call_sum_us += call_us;
+    if (!sent) {
         C.awaiting = false;
         ++C.dst.tx_failures;
         return false;

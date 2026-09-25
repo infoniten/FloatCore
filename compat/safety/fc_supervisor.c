@@ -30,6 +30,8 @@ static struct {
     FcSupervisorInputs in;
     bool loop_tick_seen;
     bool imu_sample_seen;
+    // Крайний момент прогона замкнутого контура (ТЗ v0.9K §7). Ноль — прогона нет.
+    uint64_t burst_deadline_us;
 } S;
 
 static void transition(FcSupervisorState next, uint64_t now_us) {
@@ -77,12 +79,24 @@ void fc_supervisor_self_test_result(bool passed, uint64_t now_us) {
     }
 }
 
-// Условия, без которых READY невозможен. Отсутствие любого из них — не отказ,
-// а просто отказ в переходе.
-static bool ready_conditions_met(void) {
+// Исправность системы без учёта датчиков ног.
+static bool base_conditions_met(void) {
     return S.in.platform_initialized && S.in.config_valid && S.in.loop_alive &&
-           S.in.imu_healthy && S.in.watchdog_healthy && !S.in.footpad_engaged &&
-           S.in.calibration_valid;
+           S.in.imu_healthy && S.in.watchdog_healthy && S.in.calibration_valid;
+}
+
+// Условия, без которых READY невозможен. Отсутствие любого из них — не отказ,
+// а просто отказ в переходе. Готовность объявляется только на свободной доске.
+static bool ready_conditions_met(void) {
+    return base_conditions_met() && !S.in.footpad_engaged;
+}
+
+// Условия удержания ARMED и RUNNING (v0.9K). Отличие от READY одно: нажатие
+// датчиков ног допустимо, но ТОЛЬКО как имитация стенда. Refloat подаёт ток
+// лишь при нажатых датчиках, поэтому без этого прогон невозможен; настоящее
+// нажатие по-прежнему снимает готовность.
+static bool armed_conditions_met(void) {
+    return base_conditions_met() && (!S.in.footpad_engaged || S.in.footpad_simulated);
 }
 
 bool fc_supervisor_request_ready(uint64_t now_us) {
@@ -99,10 +113,58 @@ bool fc_supervisor_request_ready(uint64_t now_us) {
     return true;
 }
 
+// --------------------------------------- замкнутый контур (ТЗ v0.9K §6, §7)
+//
+// DISARMED -> READY (оператор) -> ARMED (готов к контуру) -> RUNNING (прогон
+// с жёстким сроком) -> DISARMED (сам, по сроку).
+//
+// ARMED здесь означает «готов, но ничего не подаёт»: выход на мотор
+// разрешён только в RUNNING (fc_supervisor_motor_output_permitted). RUNNING
+// всегда ограничен сроком, и возврат из него делает опрос супервизора —
+// независимо от гейта, который проверяет тот же срок на каждом запросе. Два
+// пути, и ни один не полагается на другой.
+//
+// В сборке без замкнутого контура обе функции отказывают всегда.
+bool fc_supervisor_request_closed_loop_ready(uint64_t now_us) {
+#if !FC_CLOSED_LOOP_AVAILABLE
+    (void) now_us;
+    return false;
+#else
+    if (S.state != FC_SUP_READY || S.faults != FC_FAULT_NONE || !ready_conditions_met()) {
+        return false;
+    }
+    transition(FC_SUP_ARMED, now_us);
+    return true;
+#endif
+}
+
+bool fc_supervisor_begin_burst(uint64_t duration_us, uint64_t now_us) {
+#if !FC_CLOSED_LOOP_AVAILABLE
+    (void) duration_us;
+    (void) now_us;
+    return false;
+#else
+    if (S.state != FC_SUP_ARMED || S.faults != FC_FAULT_NONE || !armed_conditions_met()) {
+        return false;
+    }
+    if (duration_us == 0 || duration_us > FC_SUP_BURST_MAX_US) {
+        return false;
+    }
+    S.burst_deadline_us = now_us + duration_us;
+    transition(FC_SUP_RUNNING, now_us);
+    return true;
+#endif
+}
+
+uint64_t fc_supervisor_burst_deadline_us(void) {
+    return S.burst_deadline_us;
+}
+
 void fc_supervisor_disarm(uint64_t now_us) {
     // Снятие готовности разрешено из любого состояния, кроме FAULT:
     // из FAULT выход только через явное снятие отказа.
     if (S.state == FC_SUP_READY || S.state == FC_SUP_ARMED || S.state == FC_SUP_RUNNING) {
+        S.burst_deadline_us = 0;
         transition(FC_SUP_DISARMED, now_us);
     }
 }
@@ -228,6 +290,18 @@ void fc_supervisor_report_footpad(bool engaged, uint64_t now_us) {
     if (engaged && S.state == FC_SUP_READY) {
         transition(FC_SUP_DISARMED, now_us);
     }
+    // В ARMED и RUNNING — сразу, не дожидаясь опроса: гейт смотрит на
+    // состояние при каждом запросе, и лишний период тут недопустим.
+    if (engaged && !S.in.footpad_simulated &&
+        (S.state == FC_SUP_ARMED || S.state == FC_SUP_RUNNING)) {
+        S.burst_deadline_us = 0;
+        transition(FC_SUP_DISARMED, now_us);
+    }
+}
+
+void fc_supervisor_report_footpad_simulated(bool simulated, uint64_t now_us) {
+    (void) now_us;
+    S.in.footpad_simulated = simulated;
 }
 
 void fc_supervisor_raise_fault(uint32_t fault_mask, uint64_t now_us) {
@@ -267,8 +341,19 @@ void fc_supervisor_poll(uint64_t now_us) {
         }
     }
 
+    // Срок прогона истёк — выход из RUNNING без чьей-либо помощи (v0.9K §7).
+    // Возврат именно в DISARMED: новый прогон требует нового вооружения.
+    if (S.state == FC_SUP_RUNNING && now_us >= S.burst_deadline_us) {
+        S.burst_deadline_us = 0;
+        transition(FC_SUP_DISARMED, now_us);
+    }
+
     // Условия READY могли пропасть без отказа — тогда просто снимаем готовность.
-    if (S.state == FC_SUP_READY && !ready_conditions_met()) {
+    // То же для ARMED и RUNNING по их собственным условиям: пропавшее условие
+    // снимает и готовность к контуру, и сам прогон.
+    if ((S.state == FC_SUP_READY && !ready_conditions_met()) ||
+        ((S.state == FC_SUP_ARMED || S.state == FC_SUP_RUNNING) && !armed_conditions_met())) {
+        S.burst_deadline_us = 0;
         transition(FC_SUP_DISARMED, now_us);
     }
 }
@@ -338,7 +423,8 @@ bool fc_supervisor_motor_output_permitted(void) {
     // проверка во время работы, а константа, известная компилятору.
     return false;
 #else
-    return S.state == FC_SUP_ARMED || S.state == FC_SUP_RUNNING;
+    // Только RUNNING (v0.9K). ARMED — «готов к контуру», но ничего не подаёт.
+    return S.state == FC_SUP_RUNNING;
 #endif
 }
 

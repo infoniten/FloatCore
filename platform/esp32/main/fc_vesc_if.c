@@ -15,6 +15,7 @@
 #include "fc_rt_clock.h"
 #include "../../../compat/diag/fc_shadow.h"
 #include "../../../compat/refloat_glue/refloat_facade.h"
+#include "fc_cl_burst.h"
 
 #include "../../../compat/safety/fc_motor_gate.h"
 #include "../../../compat/safety/fc_supervisor.h"
@@ -602,9 +603,8 @@ static void gate(FcMotorRequestKind kind, float value) {
 //
 // Наблюдатель никуда не передаёт: он умеет только писать в кольцо. Путь
 // отсюда к транспорту не существует как код.
-static void shadow_observe(float current) {
-    RefloatShadowFields rf;
-    refloat_facade_shadow(&rf);
+static void shadow_observe(float current, const RefloatShadowFields *prf) {
+    const RefloatShadowFields rf = *prf;
 
     FcShadowSample s;
     memset(&s, 0, sizeof s);
@@ -631,8 +631,16 @@ static void shadow_observe(float current) {
 
 static void if_mc_set_current(float current) {
     mark("if_mc_set_current");
-    shadow_observe(current);
+    RefloatShadowFields rf;
+    refloat_facade_shadow(&rf);
+    shadow_observe(current, &rf);
+#if FC_CLOSED_LOOP_AVAILABLE
+    // Сборка контура (ТЗ v0.9K): тот же гейт, плюс отметка свежести команды и
+    // журнал прогона. Срез Refloat берётся один раз — тот же, что видит тень.
+    (void) fc_cl_request_current(&rf, current);
+#else
     gate(FC_MOTOR_REQ_CURRENT, current);
+#endif
 }
 
 static void if_mc_set_brake_current(float current) {

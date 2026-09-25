@@ -18,6 +18,7 @@
 #include "../../../compat/safety/fc_imu_health.h"
 #include "../../../compat/imu/fc_imu_calibration.h"
 #include "../../../compat/safety/fc_supervisor.h"
+#include "../../../compat/refloat_glue/refloat_facade.h"
 
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -114,6 +115,13 @@ static void supervisor_task(void *arg) {
         fc_supervisor_report_watchdog(rr != ESP_RST_TASK_WDT && rr != ESP_RST_INT_WDT &&
                                           rr != ESP_RST_WDT,
                                       now);
+
+        // Датчики ног — каждый период, а не один раз при загрузке (ТЗ v0.9K).
+        // До v0.9K вход обновлялся только в app_main, и имитация нажатия была
+        // для супервизора невидима. Признак имитации сообщается ПЕРВЫМ: иначе
+        // нажатие на стенде на один вызов выглядело бы настоящим.
+        fc_supervisor_report_footpad_simulated(fc_adc_simulation_active(), now);
+        fc_supervisor_report_footpad(refloat_facade_footpad_state() != 0, now);
 
         // Валидная калибровка ориентации — условие READY (ТЗ v0.6E §7, §24).
         // Без неё платформа не знает, как датчик стоит относительно доски, и

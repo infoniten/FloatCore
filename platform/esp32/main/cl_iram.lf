@@ -1,0 +1,35 @@
+# Путь передачи пары замкнутого контура — в IRAM (разбор пропусков v0.9K).
+#
+# Зачем. В первом прогоне передача пары из контура на ядре 1 стоила в среднем
+# 408 мкс, и Refloat Main (приоритет 12, то же ядро) пропустил 19 периодов.
+# Разбор без тяги показал: тот же код в пробе на том же ядре стоит в 6–8 раз
+# меньше (сбор входов и план координатора: 24 мкс в пробе против 142–185 мкс
+# в контуре). Код один; различается содержимое кэша инструкций ядра 1, где
+# между вызовами путь вытесняют Refloat, AHRS и остальное. Та же картина, что
+# у драйвера I²C в v0.9I (i2c_iram.lf).
+#
+# Только текст (noflash_text): свободной DRAM около 8 КБ, и выносить туда
+# константы нельзя. Только сборка с замкнутым контуром: в остальных путь с
+# ядра 1 не исполняется.
+
+[mapping:fc_cl_path_iram]
+archive: libmain.a
+entries:
+    fc_cl_burst (noflash_text)
+    fc_motor_gate (noflash_text)
+    fc_supervisor (noflash_text)
+    fc_motor_experiment (noflash_text)
+    fc_dual_motor (noflash_text)
+    fc_vesc_can_motor (noflash_text)
+    fc_can_bus (noflash_text)
+    fc_can_health (noflash_text)
+
+[mapping:fc_cl_twai_iram]
+archive: libdriver.a
+entries:
+    twai (noflash_text)
+
+[mapping:fc_cl_twai_hal_iram]
+archive: libhal.a
+entries:
+    twai_hal_v1 (noflash_text)

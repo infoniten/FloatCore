@@ -43,6 +43,9 @@ void refloat_facade_stop(void);
 
 RefloatSnapshot refloat_facade_snapshot(void);
 
+/** Состояние датчиков ног (FootpadState), 0 — не нажаты. Для опроса супервизором. */
+int refloat_facade_footpad_state(void);
+
 // Лёгкий срез состояния для теневого наблюдателя (ТЗ v0.9D §7).
 //
 // Отдельно от RefloatSnapshot намеренно: тот копирует три десятка полей и
@@ -79,6 +82,23 @@ typedef struct {
 } RefloatGains;
 
 void refloat_facade_gains(RefloatGains *out);
+
+// Условия входа и всё, что меняет поведение контура в первые миллисекунды
+// после engage (ТЗ v0.9K §2, §5). Только чтение.
+typedef struct {
+    float startup_pitch_tolerance, startup_roll_tolerance, startup_speed;
+    float startup_click_current;
+    bool startup_simplestart_enabled, startup_pushstart_enabled;
+    float fault_pitch, fault_roll, fault_adc1, fault_adc2;
+    bool fault_is_dual_switch;
+    uint16_t fault_delay_pitch;
+    int parking_brake_mode;
+    float booster_angle, booster_current, brkbooster_angle, brkbooster_current;
+    float torquetilt_strength, atr_strength_up, turntilt_strength;
+    float motor_current_max, motor_current_min;  // как их видит Refloat
+} RefloatStartupConf;
+
+void refloat_facade_startup_conf(RefloatStartupConf *out);
 
 // Временная правка коэффициентов для ТЕНЕВЫХ опытов (ТЗ v0.9F §11, §12).
 //

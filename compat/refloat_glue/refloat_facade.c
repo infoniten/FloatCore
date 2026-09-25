@@ -79,6 +79,41 @@ void refloat_facade_gains(RefloatGains *out) {
     out->speed_constant = d->motor.speed_constant;
 }
 
+void refloat_facade_startup_conf(RefloatStartupConf *out) {
+    if (!out) {
+        return;
+    }
+    RefloatStartupConf z = {0};
+    *out = z;
+    if (!started) {
+        return;
+    }
+    const Data *d = (const Data *) info.arg;
+    const RefloatConfig *c = &d->float_conf;
+    out->startup_pitch_tolerance = c->startup_pitch_tolerance;
+    out->startup_roll_tolerance = c->startup_roll_tolerance;
+    out->startup_speed = c->startup_speed;
+    out->startup_click_current = c->startup_click_current;
+    out->startup_simplestart_enabled = c->startup_simplestart_enabled;
+    out->startup_pushstart_enabled = c->startup_pushstart_enabled;
+    out->fault_pitch = c->fault_pitch;
+    out->fault_roll = c->fault_roll;
+    out->fault_adc1 = c->fault_adc1;
+    out->fault_adc2 = c->fault_adc2;
+    out->fault_is_dual_switch = c->fault_is_dual_switch;
+    out->fault_delay_pitch = c->fault_delay_pitch;
+    out->parking_brake_mode = (int) c->parking_brake_mode;
+    out->booster_angle = c->booster_angle;
+    out->booster_current = c->booster_current;
+    out->brkbooster_angle = c->brkbooster_angle;
+    out->brkbooster_current = c->brkbooster_current;
+    out->torquetilt_strength = c->torquetilt_strength;
+    out->atr_strength_up = c->atr_strength_up;
+    out->turntilt_strength = c->turntilt_strength;
+    out->motor_current_max = d->motor.current_max;
+    out->motor_current_min = d->motor.current_min;
+}
+
 // Исходные коэффициенты. Сохраняются при первой правке, чтобы стенд всегда
 // можно было вернуть в состояние, в котором снимались прежние измерения.
 static struct {
@@ -177,6 +212,13 @@ bool refloat_facade_restore_gains(void) {
 
 bool refloat_facade_gains_modified(void) {
     return BASELINE.saved;
+}
+
+int refloat_facade_footpad_state(void) {
+    if (!started) {
+        return 0;
+    }
+    return (int) ((const Data *) info.arg)->footpad.state;
 }
 
 RefloatSnapshot refloat_facade_snapshot(void) {

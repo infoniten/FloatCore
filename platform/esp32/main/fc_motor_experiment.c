@@ -13,6 +13,8 @@
 #include "../../../compat/safety/fc_motor_gate.h"
 #include "../../../compat/safety/fc_supervisor.h"
 
+#include "driver/twai.h"
+#include "../../../compat/can/fc_vesc_can_motor.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -285,12 +287,148 @@ void fc_motor_experiment_init(void) {
     // Программный предел много ниже предела ESC. Координатор ОТВЕРГАЕТ то,
     // что выше, а не подрезает: подрезание превратило бы ошибку расчёта в
     // тихо принятую команду предельной величины.
+#if FC_CLOSED_LOOP_AVAILABLE
+    // Сборка контура: координатор пропускает оболочку, гейт отвергает только
+    // невозможное. Источники оператора свои пределы (1.0 и 0.5 А) проверяют
+    // сами до гейта, поэтому для них ничего не расширяется.
+    c.current_limit_a = FC_CL_ENVELOPE_A;
+    fc_dual_motor_init(&c);
+    fc_motor_gate_set_backend(&BACKEND);
+    fc_motor_gate_set_value_limit(FC_CL_REQUEST_SANITY_A);
+#else
     c.current_limit_a = FC_MOTOR_EXP_MAX_CURRENT_A;
     fc_dual_motor_init(&c);
     fc_motor_gate_set_backend(&BACKEND);
     // Motor Gate тоже держит свой предел, и он должен быть согласован.
     fc_motor_gate_set_value_limit(FC_MOTOR_EXP_MAX_CURRENT_A);
+#endif
 }
+
+#if FC_CLOSED_LOOP_AVAILABLE
+void fc_motor_experiment_note_command(uint64_t now_us) {
+    E.st.last_command_us = now_us;
+}
+
+static uint16_t PROBE_S[FC_PROBE_MAX_N];
+
+static void probe_sort_stat(uint32_t n, FcProbeStat *st) {
+    for (uint32_t i = 1; i < n; ++i) {
+        for (uint32_t j = i; j > 0 && PROBE_S[j - 1] > PROBE_S[j]; --j) {
+            uint16_t t = PROBE_S[j];
+            PROBE_S[j] = PROBE_S[j - 1];
+            PROBE_S[j - 1] = t;
+        }
+    }
+    st->min_us = PROBE_S[0];
+    st->p50_us = PROBE_S[n / 2];
+    st->max_us = PROBE_S[n - 1];
+}
+
+static inline uint16_t probe_us(uint64_t t0) {
+    uint64_t d = fc_uptime_us() - t0;
+    return (uint16_t) (d > 0xFFFFu ? 0xFFFFu : d);
+}
+
+bool fc_motor_experiment_path_probe(FcPathProbe *out, uint32_t n) {
+    if (fc_dual_motor_stats().armed || E.run || n == 0 || n > FC_PROBE_MAX_N ||
+        fc_supervisor_motor_output_permitted()) {
+        return false;
+    }
+    memset(out, 0, sizeof *out);
+    out->n = n;
+    out->core = fc_current_core();
+    out->health_bytes = sizeof(FcCanHealth);
+    out->stats_bytes = sizeof(FcCanStats);
+    out->sup_bytes = sizeof(FcSupervisorStatus);
+
+    // volatile-приёмники: иначе компилятор вправе выбросить копию целиком.
+    static volatile uint32_t sink;
+    for (int k = 0; k < FC_PROBE_COUNT; ++k) {
+        for (uint32_t i = 0; i < n; ++i) {
+            uint64_t t0 = fc_uptime_us();
+            switch (k) {
+            case FC_PROBE_CAN_HEALTH: {
+                FcCanHealth h = fc_can_bus_health();
+                sink = h.count;
+                break;
+            }
+            case FC_PROBE_CAN_STATS: {
+                FcCanStats c = fc_can_bus_stats();
+                sink = (uint32_t) c.bus_error_count;
+                break;
+            }
+            case FC_PROBE_TWAI_STATUS: {
+                twai_status_info_t ts;
+                sink = (uint32_t) twai_get_status_info(&ts);
+                break;
+            }
+            case FC_PROBE_SUP_STATUS: {
+                FcSupervisorStatus ss = fc_supervisor_status();
+                sink = (uint32_t) ss.state;
+                break;
+            }
+            case FC_PROBE_GATHER: {
+                FcDualMotorInputs in = gather(0.5f, t0);
+                sink = (uint32_t) in.now_us;
+                break;
+            }
+            case FC_PROBE_PLAN: {
+                static FcDualMotorInputs in;
+                if (i == 0) {
+                    in = gather(0.5f, t0);
+                    t0 = fc_uptime_us();
+                }
+                FcDualMotorPlan p = fc_dual_motor_plan(&in);
+                sink = p.deny_mask;
+                break;
+            }
+            case FC_PROBE_GATE_REJECT: {
+                // Только при DISARMED: проверено выше вместе с вооружением.
+                sink = (uint32_t) fc_motor_gate_request_from(FC_MOTOR_ORIGIN_REFLOAT,
+                                                             FC_MOTOR_REQ_CURRENT, 0.0f, t0);
+                break;
+            }
+            case FC_PROBE_BUILD_FRAME: {
+                FcMotorFrame f;
+                sink = (uint32_t) fc_vesc_can_motor_build_current(ID_A, 0.5f, &f);
+                break;
+            }
+            }
+            PROBE_S[i] = probe_us(t0);
+        }
+        probe_sort_stat(n, &out->st[k]);
+    }
+    (void) sink;
+    return true;
+}
+
+uint32_t fc_motor_experiment_dry_plan_us(void) {
+    if (fc_dual_motor_stats().armed) {
+        return 0;
+    }
+    uint64_t t0 = fc_uptime_us();
+    FcDualMotorInputs in = gather(0.5f, t0);
+    FcDualMotorPlan p = fc_dual_motor_plan(&in);
+    uint32_t us = (uint32_t) (fc_uptime_us() - t0);
+    // Отказ обязателен: координатор обезоружен. Если план вдруг разрешил —
+    // исполнять его здесь всё равно нечем, execute не вызывается.
+    (void) p;
+    return us ? us : 1u;
+}
+
+void fc_motor_experiment_tx_trace(FcMotorTxTrace *out) {
+    for (int k = 0; k < 2; ++k) {
+        out->tx_us[k] = E.st.tx_us[k];
+        out->tx_amps[k] = E.st.tx_amps[k];
+        out->tx_ok[k] = E.st.tx_ok[k];
+    }
+    out->skew_us = E.st.skew_last_us;
+    out->deny_mask = E.st.last_deny_mask;
+    out->pairs_sent = E.st.pairs_sent;
+    out->pairs_partial = E.st.pairs_partial;
+    out->pairs_denied = E.st.pairs_denied;
+}
+#endif
 
 bool fc_motor_experiment_arm(uint32_t *deny_mask) {
     FcSupervisorStatus s = fc_supervisor_status();

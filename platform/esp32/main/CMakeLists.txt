@@ -1,8 +1,14 @@
 # Платформенный слой FloatCore для ESP32.
 # Здесь НЕТ ни одного исходника Refloat: он собирается компонентом refloat,
 # у которого другой набор include-путей (см. комментарий в fc_platform.h).
+# Фрагмент пути передачи в IRAM — только в сборке замкнутого контура.
+set(FC_LDFRAGMENTS "i2c_iram.lf")
+if(FLOATCORE_CLOSED_LOOP)
+    list(APPEND FC_LDFRAGMENTS "cl_iram.lf")
+endif()
+
 idf_component_register(
-    LDFRAGMENTS "i2c_iram.lf"
+    LDFRAGMENTS ${FC_LDFRAGMENTS}
     SRCS
         "app_main.c"
         "fc_vesc_if.c"
@@ -36,6 +42,8 @@ idf_component_register(
         "../../../compat/safety/fc_battery_model.c"
         "../../../compat/safety/fc_motor_permit.c"
         "../../../compat/safety/fc_flash_policy.c"
+        "../../../compat/safety/fc_closed_loop.c"
+        "fc_cl_burst.c"
         "../../../compat/motor/fc_motor_model.c"
         "../../../compat/config/floatcore_limits.c"
         "../../../compat/imu/fc_ahrs.c"
@@ -89,6 +97,18 @@ else()
                         "'${FLOATCORE_PROFILE}'")
 endif()
 message(STATUS "FloatCore: профиль сборки = ${FLOATCORE_PROFILE}")
+
+# Замкнутый контур Refloat -> мотор (ТЗ v0.9K). Отдельный флаг поверх
+# экспериментального профиля: `idf.py -B build_cl -DFLOATCORE_PROFILE=experimental
+# -DFLOATCORE_CLOSED_LOOP=1 build`. Без экспериментального профиля не
+# собирается вовсе — это проверяет и CMake, и fc_build_profile.h.
+if(FLOATCORE_CLOSED_LOOP)
+    if(NOT FLOATCORE_PROFILE STREQUAL "experimental")
+        message(FATAL_ERROR "FLOATCORE_CLOSED_LOOP требует FLOATCORE_PROFILE=experimental")
+    endif()
+    target_compile_definitions(${COMPONENT_LIB} PUBLIC FLOATCORE_REFLOAT_REAL_MOTOR_LOOP=1)
+    message(STATUS "FloatCore: ЗАМКНУТЫЙ КОНТУР собран (только стенд, колесо вывешено)")
+endif()
 
 # Профиль шины CAN — тоже свойство двоичного файла.
 #

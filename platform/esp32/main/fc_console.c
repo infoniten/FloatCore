@@ -45,6 +45,12 @@
 #include "fc_sched.h"
 #include "../../../compat/can/fc_vesc_can.h"
 #include "../../../compat/vesc_protocol/packet.h"
+#if FC_CLOSED_LOOP_AVAILABLE
+#include "fc_cl_burst.h"
+#include "../../../compat/motor/fc_motor_model.h"
+#include "../../../compat/safety/fc_battery_model.h"
+#include "../../../compat/safety/fc_closed_loop.h"
+#endif
 
 #include "esp_heap_caps.h"
 #include "esp_system.h"
@@ -1320,6 +1326,9 @@ static void cmd_help(void) {
     printf("                         motor-oneshot-prep | motor-oneshot-fire\n");
     printf("                         motor-clear-latch | motor-inject <маска> |\n");
     printf("                         motor-reset-stats\n");
+#if FC_CLOSED_LOOP_AVAILABLE
+    printf("ЗАМКНУТЫЙ КОНТУР (стенд!): ready, motor-arm, cl-ready, cl-burst <мс>, cl-report\n");
+#endif
 #endif
     printf("профиль сборки:          %s\n", FC_PROFILE_NAME);
     printf("команд управления мотором нет: в этой сборке нет кода, способного что-либо\n");
@@ -1792,6 +1801,911 @@ static void cmd_oneshot_report(void) {
     printf("CAN        ошибок шины %llu, BUS_OFF %llu\n", (unsigned long long) cs.bus_error_count,
            (unsigned long long) cs.bus_off_count);
 }
+
+#if FC_CLOSED_LOOP_AVAILABLE
+// ------------------------------------ прогон замкнутого контура (ТЗ v0.9K)
+//
+// Три шага, каждый — отдельная команда оператора:
+//
+//   cl-ready        проверки, снимок конфигурации §2, чекпойнт §8.
+//                   При успехе супервизор READY -> ARMED («готов к
+//                   контуру»); тяги нет. Токен на 60 с.
+//   cl-burst <мс>   нажатие датчиков (имитация), ожидание engage Refloat,
+//                   RUNNING на заданный срок, сам останов по сроку. Печати во
+//                   время прогона нет.
+//   cl-report       разбор записанного журнала. Без прогона — холостой проход
+//                   всего пути печати (урок v0.9J).
+//
+// После прогона система обезоружена целиком: координатор, супервизор, гейт.
+// Следующий прогон — снова ready, motor-arm, cl-ready.
+
+#define CL_TTL_US 60000000ull
+#define CL_FIRST_MAX_MS 150u     // §7: первый прогон 100–150 мс
+#define CL_TAIL_US 60000ull      // таймаут ESC 50 мс + запас: хвост журнала
+#define CL_ENGAGE_TIMEOUT_MS 300u
+#define CL_STACK_MIN_B 1024u
+#define CL_SAT_EPS_A 0.001f
+#define CL_SIGN_EPS_A 0.05f      // ниже этого знак команды не считается
+
+static struct {
+    bool token;
+    uint64_t token_us;
+    uint32_t bursts_done;
+    uint32_t last_ok_ms;
+    bool report_pending;
+    // запуск
+    bool started;
+    const char *abort_reason;
+    uint32_t ms;
+    uint64_t engage_wait_us;    // от нажатия датчиков до RUNNING Refloat
+    uint64_t start_us, deadline_us;
+    FcSupervisorState sup_after_deadline;
+    uint64_t sup_after_deadline_at_us;
+    bool gate_active_after_deadline;
+    // счётчики до и после
+    HalfTelemetry pre[2], post[2];
+    FcMotorTxTrace tr0, tr1;
+    FcGateBurstStats gb;
+    uint64_t flash_exec_armed, flash_exec_disarm;
+    uint32_t missed0[FC_TIMING_COUNT], missed1[FC_TIMING_COUNT];
+    uint64_t can_err0, can_err1, bus_off0, bus_off1;
+    uint64_t imu_skips0, imu_skips1;
+} CL;
+
+static const FcTimingChannel CL_RT[] = {FC_TIMING_CONTROL, FC_TIMING_MAIN, FC_TIMING_AUX,
+                                        FC_TIMING_IMU_WAKE, FC_TIMING_IMU_READ,
+                                        FC_TIMING_SUPERVISOR, FC_TIMING_CAN_RX};
+#define CL_RT_N (sizeof(CL_RT) / sizeof(CL_RT[0]))
+
+static bool cl_node_fresh(uint8_t id) {
+    static FcCanHealth h;
+    h = fc_can_bus_health();
+    const FcCanNode *n = fc_can_health_node(&h, id);
+    if (n == NULL || !n->ever_seen) {
+        return false;
+    }
+    uint64_t last = n->last_status_us > n->last_seen_us ? n->last_status_us : n->last_seen_us;
+    uint64_t now = fc_uptime_us();
+    return now > last ? (now - last) < FC_DUAL_NODE_FRESH_US : true;
+}
+
+static FcClosedLoopConfig cl_config(const RefloatGains *g, const RefloatStartupConf *sc) {
+    float kt = g->speed_constant > 0.0f ? 1.0f / g->speed_constant : 0.0f;
+    FcClosedLoopConfig c = {
+        .envelope_a = FC_CL_ENVELOPE_A,
+        .amps_per_deg = kt > 0.0f ? g->kp * g->torque_constant_compat / kt : 0.0f,
+        .amps_per_deg_per_s = kt > 0.0f ? g->kp2 * g->torque_constant_compat / kt : 0.0f,
+        .refloat_pitch_tolerance_deg = sc->startup_pitch_tolerance,
+    };
+    return c;
+}
+
+// Входы проверки входа. supervisor_ok задаёт вызывающий: в cl-ready это
+// READY, в cl-burst — ARMED.
+static void cl_inputs(FcClosedLoopInputs *in, const RefloatShadowFields *sh, bool supervisor_ok) {
+    static FcCanStats cs;
+    cs = fc_can_bus_stats();
+    static FcLimitsSyncStatus ls;
+    ls = fc_limits_sync_status();
+    FcSupervisorStatus ss = fc_supervisor_status();
+    FcBatteryModel bm = fc_battery_model_applied();
+    memset(in, 0, sizeof *in);
+    // Бит REFLOAT в маске гейта ставит только старт прогона (arm_burst);
+    // здесь проверяется, что механизм прогона в сборке есть и сейчас не взведён.
+    in->gate_closed_loop_enabled = !fc_motor_gate_burst_stats().active;
+    in->coordinator_armed = fc_motor_experiment_armed();
+    in->supervisor_entry_allowed = supervisor_ok && ss.faults == 0;
+    in->imu_permit = (uint32_t) fc_supervisor_last_imu_permit();
+    in->calibration_valid = fc_imu_rt_cal_status() == FC_IMU_CAL_VALID;
+    in->node_a_fresh = cl_node_fresh(118);
+    in->node_b_fresh = cl_node_fresh(100);
+    in->can_healthy = cs.bus_off_count == 0 && cs.bus_error_count == 0 && fc_can_bus_running();
+    in->motor_model_valid = fc_motor_model_ready_for_torque_test(NULL);
+    in->battery_model_valid = fc_battery_model_valid(&bm, NULL);
+    in->limits_synchronized = ls.applied && ls.common.current_max > 0.0f;
+    in->realtime_qualified = ss.inputs.watchdog_healthy && ss.inputs.loop_alive;
+    // Датчики ног: либо не нажаты, либо нажаты ИМИТАЦИЕЙ. Настоящее нажатие
+    // на стенде без доски означало бы неисправность, а не человека.
+    in->test_condition_explicit = refloat_facade_footpad_state() == 0 || fc_adc_simulation_active();
+    in->balance_pitch_deg = sh->balance_pitch;
+    in->pitch_rate_dps = sh->pitch_rate;
+}
+
+static void cl_print_deny(uint32_t m) {
+    for (int b = 0; b < FC_CL_DENY_COUNT; ++b) {
+        if (m & (1u << b)) {
+            printf("      - %s\n", fc_closed_loop_deny_name((FcClosedLoopDeny) b));
+        }
+    }
+}
+
+static uint32_t cl_stack(const char *name) {
+    TaskHandle_t h = xTaskGetHandle(name);
+    return h ? (uint32_t) uxTaskGetStackHighWaterMark(h) : 0;
+}
+
+static void cl_print_stacks(void) {
+    printf("STACK      console %u B, fc_imu_rt %u B, Refloat Main %u B, Refloat Aux %u B, "
+           "fc_log %u B, fc_super %u B (минимум свободного)\n",
+           (unsigned) uxTaskGetStackHighWaterMark(NULL), (unsigned) fc_imu_rt_stack_watermark(),
+           (unsigned) cl_stack("Refloat Main"), (unsigned) cl_stack("Refloat Aux"),
+           (unsigned) cl_stack("fc_log"), (unsigned) fc_supervisor_stack_watermark());
+}
+
+static bool cl_stacks_ok(void) {
+    return uxTaskGetStackHighWaterMark(NULL) >= CL_STACK_MIN_B &&
+           fc_imu_rt_stack_watermark() >= CL_STACK_MIN_B &&
+           cl_stack("Refloat Main") >= CL_STACK_MIN_B && cl_stack("Refloat Aux") >= CL_STACK_MIN_B &&
+           cl_stack("fc_log") >= CL_STACK_MIN_B && fc_supervisor_stack_watermark() >= CL_STACK_MIN_B;
+}
+
+static void cl_snapshot_rt(uint32_t *missed) {
+    for (unsigned i = 0; i < CL_RT_N; ++i) {
+        static FcTimingStats t;
+        t = fc_timing_get(CL_RT[i]);
+        missed[i] = t.missed;
+    }
+}
+
+static void cmd_cl_ready(void) {
+    CL.token = false;
+    int fails = 0;
+    static RefloatShadowFields sh;
+    refloat_facade_shadow(&sh);
+    static RefloatGains g;
+    refloat_facade_gains(&g);
+    static RefloatStartupConf sc;
+    refloat_facade_startup_conf(&sc);
+    static FcSupervisorStatus ss;
+    ss = fc_supervisor_status();
+    static FcLimitsSyncStatus ls;
+    ls = fc_limits_sync_status();
+    static FcFlashPolicyStats fp;
+    fp = fc_flash_policy_stats();
+    static FcMotorExpStats es;
+    es = fc_motor_experiment_stats();
+
+    FcClosedLoopConfig cfg = cl_config(&g, &sc);
+    FcClosedLoopWindows w = fc_closed_loop_windows(&cfg);
+    static FcClosedLoopInputs in;
+    cl_inputs(&in, &sh, ss.state == FC_SUP_READY);
+    uint32_t deny = 0;
+    bool may = fc_closed_loop_may_enter(&cfg, &in, &deny);
+
+    uint32_t missed[CL_RT_N];
+    cl_snapshot_rt(missed);
+    uint32_t missed_sum = 0;
+    for (unsigned i = 0; i < CL_RT_N; ++i) {
+        missed_sum += missed[i];
+    }
+
+    printf("=== ПРОВЕРКИ ЗАМКНУТОГО КОНТУРА ================================\n");
+    check(!CL.report_pending, "прошлый прогон разобран (cl-report)", &fails);
+    check(fabsf(g.kp - 4.0f) < 1e-4f && fabsf(g.kp2 - 0.12f) < 1e-4f,
+          "кандидат A: kp 4.000, kp2 0.120", &fails);
+    check(g.ki == 0.0f && g.ki_limit == 0.0f,
+          "интеграл как при квалификации: ki 0, ki_limit 0", &fails);
+    check(sc.startup_click_current == 0.0f,
+          "щелчок при engage 0 А (иначе знакопеременная добавка к току)", &fails);
+    check(sh.state != 3, "Refloat НЕ в RUNNING: engage будет частью прогона", &fails);
+    check(!fc_adc_simulation_active() && refloat_facade_footpad_state() == 0,
+          "датчики ног не нажаты, имитация выключена", &fails);
+    check(ss.state == FC_SUP_READY && ss.faults == 0, "супервизор READY, отказов нет", &fails);
+    check(fc_motor_experiment_armed(), "координатор вооружён оператором (motor-arm)", &fails);
+    check(!es.running, "источник 500 Гц НЕ работает", &fails);
+    check(!fc_motor_gate_burst_stats().active, "гейт: прогон не взведён", &fails);
+    check(!fp.pending && !fc_storage_busy(NULL), "отложенных записей во flash нет", &fails);
+    check(!fc_flash_write_allowed(), "запись во flash сейчас ЗАПРЕЩЕНА", &fails);
+    check(missed_sum == 0, "пропусков реального времени с timing-reset нет", &fails);
+    check(cl_stacks_ok(), "запас стека у всех задач пути ≥ 1024 Б", &fails);
+    check(may, "условия входа fc_closed_loop (все, включая окна)", &fails);
+    if (!may) {
+        cl_print_deny(deny);
+    }
+
+    // Телеметрия половин — последней, она занимает шину.
+    CL.pre[0] = read_half(118, true);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    CL.pre[1] = read_half(100, true);
+    for (int k = 0; k < 2; ++k) {
+        const HalfTelemetry *h = &CL.pre[k];
+        char what[160];
+        snprintf(what, sizeof(what),
+                 "половина %u: отказ NONE, таймаут 50 мс, по таймауту выбег (0 А)", k ? 100 : 118);
+        check(h->values_ok && h->v.has_fault && h->v.fault_code == 0 && h->timeout_ok &&
+                  h->t.timeout_ms == 50 && h->t.timeout_brake_current_a == 0.0f,
+              what, &fails);
+    }
+
+    printf("\n=== СНИМОК КОНФИГУРАЦИИ §2 =====================================\n");
+    printf("Refloat    kp %.3f  kp2 %.3f  ki %.5f  ki_limit %.2f  kp_brake %.2f  kp2_brake %.2f\n",
+           (double) g.kp, (double) g.kp2, (double) g.ki, (double) g.ki_limit,
+           (double) g.kp_brake, (double) g.kp2_brake);
+    printf("           mahony_kp %.2f; startup: pitch_tol %.2f°, roll_tol %.1f°, speed %.1f °/с,"
+           " click %.2f А, simplestart %d, pushstart %d\n",
+           (double) g.mahony_kp, (double) sc.startup_pitch_tolerance,
+           (double) sc.startup_roll_tolerance, (double) sc.startup_speed,
+           (double) sc.startup_click_current, sc.startup_simplestart_enabled,
+           sc.startup_pushstart_enabled);
+    printf("           fault: pitch %.1f°, roll %.1f°, delay_pitch %u мс, adc %.2f/%.2f В, "
+           "dual_switch %d; parking_brake %d\n",
+           (double) sc.fault_pitch, (double) sc.fault_roll, (unsigned) sc.fault_delay_pitch,
+           (double) sc.fault_adc1, (double) sc.fault_adc2, sc.fault_is_dual_switch,
+           sc.parking_brake_mode);
+    printf("           booster %.1f А при %.1f°, brkbooster %.1f А при %.1f°; torquetilt %.2f, "
+           "atr_up %.2f, turntilt %.2f\n",
+           (double) sc.booster_current, (double) sc.booster_angle,
+           (double) sc.brkbooster_current, (double) sc.brkbooster_angle,
+           (double) sc.torquetilt_strength, (double) sc.atr_strength_up,
+           (double) sc.turntilt_strength);
+    printf("           пределы тока в Refloat %+.2f / %+.2f А; Kt эталон %.4f, наш %.4f Н·м/А\n",
+           (double) sc.motor_current_max, (double) sc.motor_current_min,
+           (double) g.torque_constant_compat,
+           g.speed_constant > 0.0f ? (double) (1.0f / g.speed_constant) : 0.0);
+    for (int k = 0; k < 2; ++k) {
+        const FcMcconfLimits *m = &ls.half[k];
+        printf("ESC %u    ток %+.2f / %+.2f А, вход %+.2f / %+.2f А, полюсов %u, λ %.6f; "
+               "таймаут %lu мс, тормоз по таймауту %.2f А\n",
+               k ? 100 : 118, (double) m->current_max, (double) m->current_min,
+               (double) m->in_current_max, (double) m->in_current_min, (unsigned) m->motor_poles,
+               (double) m->flux_linkage, (unsigned long) CL.pre[k].t.timeout_ms,
+               (double) CL.pre[k].t.timeout_brake_current_a);
+    }
+
+    float err = sh.setpoint - sh.balance_pitch;
+    printf("\n=== ЧЕКПОЙНТ §8 ================================================\n");
+    printf("BUILD      профиль %s, CAN %s, замкнутый контур СОБРАН\n", FC_PROFILE_NAME,
+           FC_CAN_PROFILE_NAME);
+    printf("STATE      супервизор %s -> при успехе ARMED; координатор %s; Refloat %s\n",
+           fc_supervisor_state_name(ss.state),
+           fc_motor_experiment_armed() ? "ВООРУЖЁН" : "не вооружён",
+           refloat_facade_state_name(sh.state));
+    printf("BATTERY    118: %.1f В, 100: %.1f В — сверить с мультиметром\n",
+           (double) CL.pre[0].v.v_in, (double) CL.pre[1].v.v_in);
+    printf("IMU        balance_pitch %+.3f° (pitch %+.3f°), скорость %+.2f °/с; политика %s; "
+           "калибровка %s\n",
+           (double) sh.balance_pitch, (double) sh.pitch, (double) sh.pitch_rate,
+           fc_imu_permit_name(fc_supervisor_last_imu_permit()),
+           fc_imu_rt_cal_status() == FC_IMU_CAL_VALID ? "действительна" : "НЕТ");
+    printf("WINDOW     |угол| < %.3f° = %.2f А / %.3f А/°;  |скорость| < %.2f °/с = %.2f А / "
+           "%.4f А/(°/с); потолок Refloat %.2f°\n",
+           (double) w.pitch_window_deg, (double) cfg.envelope_a, (double) cfg.amps_per_deg,
+           (double) w.rate_window_dps, (double) cfg.envelope_a, (double) cfg.amps_per_deg_per_s,
+           (double) sc.startup_pitch_tolerance);
+    printf("NODES      118: %s, отказ %s;  100: %s, отказ %s\n",
+           in.node_a_fresh ? "свежий" : "МОЛЧИТ",
+           CL.pre[0].v.has_fault ? fc_vesc_fault_name(CL.pre[0].v.fault_code) : "?",
+           in.node_b_fresh ? "свежий" : "МОЛЧИТ",
+           CL.pre[1].v.has_fault ? fc_vesc_fault_name(CL.pre[1].v.fault_code) : "?");
+    printf("CURRENT    ожидаемый ток Refloat сейчас ≈ %+.3f А (ошибка %+.3f° × %.3f А/°);\n",
+           (double) (err * cfg.amps_per_deg), (double) err, (double) cfg.amps_per_deg);
+    printf("           мёртвая зона инвертора ~0.38 А = %.3f°\n",
+           cfg.amps_per_deg > 0.0f ? (double) (0.38f / cfg.amps_per_deg) : 0.0);
+    printf("           оболочка ±%.2f А (зажимает гейт); ESC %+.2f / %+.2f А; координатор "
+           "отвергает выше %.2f А\n",
+           (double) FC_CL_ENVELOPE_A, (double) ls.common.current_max,
+           (double) ls.common.current_min, (double) FC_CL_ENVELOPE_A);
+    printf("TIMING     контур 500 Гц; разбег пары по v0.9J 54 мкс, граница %u мкс\n",
+           (unsigned) FC_DUAL_MAX_SKEW_US);
+    printf("           прогон: срок задаётся cl-burst (первый ≤ %u мс, предпочтительно 100);\n",
+           (unsigned) CL_FIRST_MAX_MS);
+    printf("           таймаут ESC 118 %lu мс, 100 %lu мс; после срока ток снимается таймаутом\n",
+           (unsigned long) CL.pre[0].t.timeout_ms, (unsigned long) CL.pre[1].t.timeout_ms);
+    printf("           первые ~15 мс после engage Refloat сам ограничивает ток (softstart\n");
+    printf("           100 А/с) и ведёт setpoint от текущего угла к 0 со скоростью %.0f °/с\n",
+           (double) sc.startup_speed);
+    printf("FLASH      ожидает %s; запись во время ARMED/RUNNING: %s\n",
+           fp.pending ? "ДА" : "нет", fc_flash_write_allowed() ? "ВОЗМОЖНА" : "запрещена");
+    cl_print_stacks();
+
+    if (fails) {
+        printf("\nОТКАЗ: не выполнено условий — %d. Готовность к контуру НЕ объявлена.\n", fails);
+        return;
+    }
+    if (!fc_supervisor_request_closed_loop_ready(fc_uptime_us())) {
+        printf("\nОТКАЗ: супервизор не перешёл в ARMED.\n");
+        return;
+    }
+    CL.flash_exec_armed = fc_flash_policy_stats().executed;
+    CL.token = true;
+    CL.token_us = fc_uptime_us();
+    printf("\nСупервизор ARMED (готов к контуру, тяги нет). Токен 60 с.\n");
+    printf("Запуск: cl-burst <мс>. Отмена: disarm\n");
+}
+
+static void cl_abort(const char *why) {
+    CL.abort_reason = why;
+    fc_motor_gate_revoke_burst();
+    fc_adc_simulate_footpads(false, 0.0f);
+    fc_cl_log_stop();
+    fc_motor_experiment_disarm();
+    fc_supervisor_disarm(fc_uptime_us());
+    printf("ПРОГОН ОТМЕНЁН: %s. Всё обезоружено.\n", why);
+}
+
+static void cmd_cl_burst(const char *arg) {
+    uint32_t ms = arg ? (uint32_t) strtoul(arg, NULL, 10) : 0;
+    if (!CL.token) {
+        printf("ОТКЛОНЕНО: нет действительного cl-ready\n");
+        return;
+    }
+    CL.token = false;  // одноразовый, гасится до любых действий
+    if (fc_uptime_us() - CL.token_us > CL_TTL_US) {
+        cl_abort("токен просрочен — чекпойнт описывал прошлое");
+        return;
+    }
+    uint32_t max_ms = CL.bursts_done == 0 ? CL_FIRST_MAX_MS
+                                          : (CL.last_ok_ms * 2u + 50u > FC_SUP_BURST_MAX_US / 1000u
+                                                 ? FC_SUP_BURST_MAX_US / 1000u
+                                                 : CL.last_ok_ms * 2u + 50u);
+    if (ms == 0 || ms > max_ms) {
+        printf("срок %lu мс вне допустимого (1…%lu мс)\n", (unsigned long) ms,
+               (unsigned long) max_ms);
+        cl_abort("недопустимый срок");
+        return;
+    }
+
+    static RefloatShadowFields sh;
+    refloat_facade_shadow(&sh);
+    static RefloatGains g;
+    refloat_facade_gains(&g);
+    static RefloatStartupConf sc;
+    refloat_facade_startup_conf(&sc);
+    FcClosedLoopConfig cfg = cl_config(&g, &sc);
+    static FcClosedLoopInputs in;
+    cl_inputs(&in, &sh, fc_supervisor_state() == FC_SUP_ARMED);
+    uint32_t deny = 0;
+    if (!fc_closed_loop_may_enter(&cfg, &in, &deny) || sh.state == 3) {
+        printf("условия входа нарушены:\n");
+        cl_print_deny(deny);
+        cl_abort("условия входа");
+        return;
+    }
+
+    memset(&CL.gb, 0, sizeof CL.gb);
+    CL.started = false;
+    CL.abort_reason = NULL;
+    CL.ms = ms;
+    CL.report_pending = true;
+
+    // Опорный тахометр — до нажатия датчиков.
+    CL.pre[0] = read_half(118, false);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    CL.pre[1] = read_half(100, false);
+
+    static FcCanStats cs;
+    cs = fc_can_bus_stats();
+    CL.can_err0 = cs.bus_error_count;
+    CL.bus_off0 = cs.bus_off_count;
+    CL.imu_skips0 = fc_imu_pipeline_stats().suspected_skips;
+    cl_snapshot_rt(CL.missed0);
+    fc_motor_experiment_tx_trace(&CL.tr0);
+
+    // Нажатие — имитация; супервизор видит признак имитации раньше нажатия.
+    fc_cl_log_arm();
+    uint64_t t_press = fc_uptime_us();
+    fc_adc_simulate_footpads(true, 3.0f);
+    for (;;) {
+        refloat_facade_shadow(&sh);
+        if (sh.state == 3 || fc_uptime_us() - t_press > CL_ENGAGE_TIMEOUT_MS * 1000ull) {
+            break;
+        }
+        vTaskDelay(1);
+    }
+    CL.engage_wait_us = fc_uptime_us() - t_press;
+    if (sh.state != 3) {
+        cl_abort("Refloat не вошёл в RUNNING за 300 мс");
+        return;
+    }
+    if (!(fabsf(sh.balance_pitch) < fc_closed_loop_windows(&cfg).pitch_window_deg) ||
+        !(fabsf(sh.pitch_rate) < fc_closed_loop_windows(&cfg).rate_window_dps) ||
+        fc_supervisor_state() != FC_SUP_ARMED) {
+        cl_abort("к моменту engage угол, скорость или супервизор вне условий");
+        return;
+    }
+
+    uint64_t start = fc_uptime_us();
+    uint64_t deadline = start + (uint64_t) ms * 1000ull;
+    fc_can_status_capture_start(ms + 400u);
+    fc_cl_log_start(start, deadline, CL_TAIL_US);
+    if (!fc_motor_gate_arm_burst(deadline, FC_CL_ENVELOPE_A)) {
+        cl_abort("гейт не принял прогон");
+        return;
+    }
+    if (!fc_supervisor_begin_burst((uint64_t) ms * 1000ull, start)) {
+        cl_abort("супервизор не перешёл в RUNNING");
+        return;
+    }
+    CL.started = true;
+    CL.start_us = start;
+    CL.deadline_us = deadline;
+
+    // Ждём срок. Печати нет: консоль на ядре 0, но вывод всё равно лишний.
+    TickType_t wait = pdMS_TO_TICKS(ms + 15u);
+    vTaskDelay(wait ? wait : 1);
+    // Состояние ДО нашего снятия: ушёл ли супервизор из RUNNING сам.
+    CL.sup_after_deadline = fc_supervisor_state();
+    CL.sup_after_deadline_at_us = fc_uptime_us();
+    CL.gate_active_after_deadline = fc_motor_gate_burst_stats().active;
+    vTaskDelay(pdMS_TO_TICKS((uint32_t) (CL_TAIL_US / 1000ull)));
+
+    CL.gb = fc_motor_gate_burst_stats();
+    CL.flash_exec_disarm = fc_flash_policy_stats().executed;
+    fc_motor_gate_revoke_burst();
+    fc_adc_simulate_footpads(false, 0.0f);
+    fc_cl_log_stop();
+    fc_motor_experiment_disarm();
+    fc_supervisor_disarm(fc_uptime_us());
+    fc_motor_experiment_tx_trace(&CL.tr1);
+    cl_snapshot_rt(CL.missed1);
+    cs = fc_can_bus_stats();
+    CL.can_err1 = cs.bus_error_count;
+    CL.bus_off1 = cs.bus_off_count;
+    CL.imu_skips1 = fc_imu_pipeline_stats().suspected_skips;
+    ++CL.bursts_done;
+
+    printf("ПРОГОН %lu мс выполнен. Refloat engage через %llu мкс после нажатия.\n",
+           (unsigned long) ms, (unsigned long long) CL.engage_wait_us);
+    printf("  гейт: пропущено %llu, зажато %llu, отвергнуто по сроку %llu\n",
+           (unsigned long long) CL.gb.allowed, (unsigned long long) CL.gb.clamped,
+           (unsigned long long) CL.gb.rejected_deadline);
+    printf("  пар целиком %llu, частичных %llu, отказов координатора %llu\n",
+           (unsigned long long) (CL.tr1.pairs_sent - CL.tr0.pairs_sent),
+           (unsigned long long) (CL.tr1.pairs_partial - CL.tr0.pairs_partial),
+           (unsigned long long) (CL.tr1.pairs_denied - CL.tr0.pairs_denied));
+    printf("  супервизор через %llu мкс после срока: %s (сам); сейчас %s\n",
+           (unsigned long long) (CL.sup_after_deadline_at_us - deadline),
+           fc_supervisor_state_name(CL.sup_after_deadline),
+           fc_supervisor_state_name(fc_supervisor_state()));
+    printf("  координатор обезоружен, датчики отпущены. Разбор: cl-report\n");
+
+    vTaskDelay(pdMS_TO_TICKS(300));
+    CL.post[0] = read_half(118, false);
+    vTaskDelay(pdMS_TO_TICKS(250));
+    CL.post[1] = read_half(100, false);
+}
+
+// Разбор пропусков v0.9K: стоимость частей пути передачи на ядре 1, БЕЗ
+// передачи. Задача-проба с приоритетом 1: контур и Refloat её вытесняют, а не
+// она их, поэтому min — чистая стоимость, а max — с вытеснением.
+static FcPathProbe CLP;
+static volatile bool CLP_OK;
+static TaskHandle_t CLP_WAITER;
+
+static void clp_task(void *arg) {
+    (void) arg;
+    CLP_OK = fc_motor_experiment_path_probe(&CLP, FC_PROBE_MAX_N);
+    xTaskNotifyGive(CLP_WAITER);
+    vTaskDelete(NULL);
+}
+
+static void cmd_cl_path_probe(void) {
+    static const char *const NAMES[FC_PROBE_COUNT] = {
+        "fc_can_bus_health() копия", "fc_can_bus_stats()", "  из неё twai_get_status_info",
+        "fc_supervisor_status()", "gather() целиком", "fc_dual_motor_plan()",
+        "сборка кадра тока", "гейт: отказ при DISARMED",
+    };
+    CLP_WAITER = xTaskGetCurrentTaskHandle();
+    if (xTaskCreatePinnedToCore(clp_task, "fc_probe", 12288, NULL, 1, NULL, 1) != pdPASS) {
+        printf("задача пробы не создана\n");
+        return;
+    }
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20000));
+    if (!CLP_OK) {
+        printf("ОТКЛОНЕНО: координатор вооружён или источник работает\n");
+        return;
+    }
+    printf("стоимость частей пути, ядро %d, n=%lu, приоритет 1 (передачи НЕТ)\n", CLP.core,
+           (unsigned long) CLP.n);
+    printf("  размеры копий: FcCanHealth %lu Б, FcCanStats %lu Б, FcSupervisorStatus %lu Б\n",
+           (unsigned long) CLP.health_bytes, (unsigned long) CLP.stats_bytes,
+           (unsigned long) CLP.sup_bytes);
+    printf("  %-32s   min    p50    max  мкс\n", "");
+    for (int k = 0; k < FC_PROBE_COUNT; ++k) {
+        printf("  %-32s %5lu  %5lu  %5lu\n", NAMES[k], (unsigned long) CLP.st[k].min_us,
+               (unsigned long) CLP.st[k].p50_us, (unsigned long) CLP.st[k].max_us);
+    }
+    printf("  gather() вызывает fc_can_bus_health() дважды и fc_can_bus_stats() раз.\n");
+}
+
+// Длительность вызова twai_transmit с заданного ядра: N диагностических
+// запросов GET_VALUES к 118 (только чтение, белый список), по одному в 250 мс.
+static int CLT_N;
+static void clt_task(void *arg) {
+    (void) arg;
+    static uint8_t buf[FC_CAN_DIAG_RX_MAX];
+    for (int i = 0; i < CLT_N; ++i) {
+        uint16_t n = 0;
+        (void) fc_can_bus_diag_request(FC_CAN_DIAG_VALUES, 118, 300, buf, sizeof buf, &n);
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    xTaskNotifyGive(CLP_WAITER);
+    vTaskDelete(NULL);
+}
+
+static void cmd_cl_tx_probe(const char *arg) {
+    int core = arg ? atoi(arg) : 1;
+    if (core != 0 && core != 1) {
+        core = 1;
+    }
+    CLT_N = 20;
+    fc_can_bus_diag_reset_stats();
+    CLP_WAITER = xTaskGetCurrentTaskHandle();
+    // Приоритет 13: выше Refloat Main (12), ниже fc_imu_rt (14), как рядом с
+    // реальным вызовом из контура насколько это возможно без контура.
+    if (xTaskCreatePinnedToCore(clt_task, "fc_txprobe", 4096, NULL, 13, NULL, core) != pdPASS) {
+        printf("задача пробы не создана\n");
+        return;
+    }
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(30000));
+    FcCanDiagStats d = fc_can_bus_diag_stats();
+    printf("twai_transmit с ядра %d: n=%lu, min %lu, mean %.1f, max %lu, последний %lu мкс; "
+           "ответов %llu, отказов передачи %llu\n",
+           d.tx_call_core, (unsigned long) d.tx_call_n, (unsigned long) d.tx_call_min_us,
+           d.tx_call_n ? (double) d.tx_call_sum_us / (double) d.tx_call_n : 0.0,
+           (unsigned long) d.tx_call_max_us, (unsigned long) d.tx_call_last_us,
+           (unsigned long long) d.responses, (unsigned long long) d.tx_failures);
+}
+
+// Стоимость отвергнутого запроса в НАСТОЯЩЕМ контуре: журнал включается при
+// обезоруженных супервизоре и координаторе, и каждый запрос Refloat
+// отвергается гейтом до backend-а. Тяги нет и быть не может.
+static void cmd_cl_loop_dry(void) {
+    if (fc_motor_experiment_armed() || fc_supervisor_motor_output_permitted() ||
+        fc_motor_gate_burst_stats().active) {
+        printf("ОТКЛОНЕНО: координатор вооружён, выход разрешён или прогон взведён\n");
+        return;
+    }
+    fc_cl_log_arm();
+    fc_cl_log_set_dry(true);
+    uint64_t now = fc_uptime_us();
+    fc_cl_log_start(now, now + 200000ull, 0);
+    vTaskDelay(pdMS_TO_TICKS(260));
+    fc_cl_log_stop();
+    uint32_t n = 0;
+    const FcClRecord *r = fc_cl_log_main(&n);
+    static uint16_t g[FC_CL_LOG_MAX], dr[FC_CL_LOG_MAX];
+    uint32_t rejected = 0, gap_max = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        g[i] = r[i].gate_us;
+        dr[i] = r[i].dry_us;
+        if (r[i].verdict != FC_GATE_ALLOWED) {
+            ++rejected;
+        }
+        if (i && r[i].t_us - r[i - 1].t_us > gap_max) {
+            gap_max = (uint32_t) (r[i].t_us - r[i - 1].t_us);
+        }
+    }
+    for (uint32_t i = 1; i < n; ++i) {
+        for (uint32_t j = i; j > 0 && g[j - 1] > g[j]; --j) {
+            uint16_t t = g[j];
+            g[j] = g[j - 1];
+            g[j - 1] = t;
+        }
+        for (uint32_t j = i; j > 0 && dr[j - 1] > dr[j]; --j) {
+            uint16_t t = dr[j];
+            dr[j] = dr[j - 1];
+            dr[j - 1] = t;
+        }
+    }
+    printf("контур: холостой gather+plan min %u, p50 %u, max %u мкс (в пробе ~24)\n",
+           n ? dr[0] : 0, n ? dr[n / 2] : 0, n ? dr[n - 1] : 0);
+    printf("контур, 200 мс, Refloat %s: запросов %lu, отвергнуто %lu; стоимость гейта min %u, "
+           "p50 %u, max %u мкс; наибольший интервал %lu мкс\n",
+           refloat_facade_state_name(refloat_facade_snapshot().state), (unsigned long) n,
+           (unsigned long) rejected, n ? g[0] : 0, n ? g[n / 2] : 0, n ? g[n - 1] : 0,
+           (unsigned long) gap_max);
+}
+
+static const char *cl_verdict_short(uint8_t v) {
+    switch ((FcGateVerdict) v) {
+    case FC_GATE_ALLOWED:
+        return "OK";
+    case FC_GATE_REJECTED_DISARMED:
+        return "DIS";
+    case FC_GATE_REJECTED_FAULT:
+        return "FLT";
+    case FC_GATE_REJECTED_INVALID:
+        return "INV";
+    case FC_GATE_REJECTED_NO_BACKEND:
+        return "NOB";
+    case FC_GATE_REJECTED_ORIGIN:
+        return "ORG";
+    case FC_GATE_REJECTED_DEADLINE:
+        return "DLN";
+    }
+    return "?";
+}
+
+static int cl_sign(float a) {
+    return a > CL_SIGN_EPS_A ? 1 : (a < -CL_SIGN_EPS_A ? -1 : 0);
+}
+
+static void cmd_cl_report(void) {
+    bool dry = !CL.started;
+    if (dry) {
+        printf("ХОЛОСТОЙ ПРОГОН ОТЧЁТА: прогона не было%s, числа ниже не о прогоне\n",
+               CL.abort_reason ? " (отменён)" : "");
+        if (CL.abort_reason) {
+            printf("  причина отмены: %s\n", CL.abort_reason);
+        }
+    }
+    while (fc_can_status_capture_active()) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    FcClLogInfo li = fc_cl_log_info();
+    uint32_t n = 0;
+    const FcClRecord *r = fc_cl_log_main(&n);
+    static FcClRecord pre[FC_CL_LOG_PRE];
+    uint32_t pn = fc_cl_log_pre(pre, FC_CL_LOG_PRE);
+    int64_t t0 = (int64_t) CL.start_us;
+
+    printf("=== ОТЧЁТ ПРОГОНА ===============================================\n");
+    printf("СРОК       %lu мс: старт %llu, срок %llu мкс; engage через %llu мкс после нажатия\n",
+           (unsigned long) CL.ms, (unsigned long long) CL.start_us,
+           (unsigned long long) CL.deadline_us, (unsigned long long) CL.engage_wait_us);
+
+    uint32_t pre_allowed = 0;
+    for (uint32_t i = 0; i < pn; ++i) {
+        if (pre[i].verdict == FC_GATE_ALLOWED || (pre[i].flags & FC_CL_F_PAIR)) {
+            ++pre_allowed;
+        }
+    }
+    printf("ДО СТАРТА  запросов Refloat %lu (в кольце %lu), пропущено гейтом %lu — ожидается 0\n",
+           (unsigned long) li.pre_total, (unsigned long) pn, (unsigned long) pre_allowed);
+
+    printf("\n  seq    t,мс  bal_pitch  rate°/с  setpoint   raw,А  выдано,А  гейт  sup  imu  "
+           "разбег  гейт,мкс\n");
+    for (uint32_t i = 0; i < n; ++i) {
+        const FcClRecord *e = &r[i];
+        printf("  %4lu %+7.2f  %+8.3f  %+7.2f  %+8.3f  %+6.3f  %s%+6.3f  %-4s  %3u  %3u  %5u  "
+               "%6u%s\n",
+               (unsigned long) e->seq, (double) ((int64_t) e->t_us - t0) / 1000.0,
+               (double) e->balance_pitch, (double) e->pitch_rate, (double) e->setpoint,
+               (double) e->raw_a, (e->flags & FC_CL_F_PAIR) ? " " : "-",
+               (double) e->delivered_a, cl_verdict_short(e->verdict), e->sup_state,
+               e->imu_permit, e->skew_us, e->gate_us,
+               e->t_us >= CL.deadline_us ? "  после срока" : "");
+    }
+
+    // Итоги по записям окна.
+    uint32_t cycles = 0, pairs = 0, partial = 0, denied = 0, after_pairs = 0, after_req = 0;
+    uint32_t sat = 0, sat_run = 0, sat_run_max = 0, reversals = 0, zero_cross = 0, rail = 0;
+    uint32_t corrective = 0, signed_n = 0, imu_bad = 0;
+    float raw_min = 1e9f, raw_max = -1e9f, del_min = 1e9f, del_max = -1e9f, slew_max = 0.0f;
+    float pitch0 = 0, pitch_last = 0, pitch_absmax = 0, rate0 = 0, rate_absmax = 0;
+    uint64_t skew_sum = 0, gate_sum = 0;
+    uint32_t skew_max = 0, gate_max = 0, gap_max = 0;
+    static uint16_t skews[FC_CL_LOG_MAX], gates[FC_CL_LOG_MAX];
+    uint64_t first_pair_us = 0, last_pair_us = 0;
+    int last_sign = 0, last_raw_sign = 0, last_sat_sign = 0;
+    uint32_t last_sat_idx = 0;
+    float prev_del = 0.0f;
+    bool have_prev = false;
+    uint64_t prev_t = 0;
+    for (uint32_t i = 0; i < n; ++i) {
+        const FcClRecord *e = &r[i];
+        if (prev_t && e->t_us - prev_t > gap_max) {
+            gap_max = (uint32_t) (e->t_us - prev_t);
+        }
+        prev_t = e->t_us;
+        if (e->t_us >= CL.deadline_us) {
+            ++after_req;
+            if (e->flags & FC_CL_F_PAIR) {
+                ++after_pairs;
+            }
+            continue;
+        }
+        if (cycles == 0) {
+            pitch0 = e->balance_pitch;
+            rate0 = e->pitch_rate;
+        }
+        ++cycles;
+        pitch_last = e->balance_pitch;
+        if (fabsf(e->balance_pitch) > pitch_absmax) {
+            pitch_absmax = fabsf(e->balance_pitch);
+        }
+        if (fabsf(e->pitch_rate) > rate_absmax) {
+            rate_absmax = fabsf(e->pitch_rate);
+        }
+        if (e->imu_permit != FC_IMU_PERMIT_OK) {
+            ++imu_bad;
+        }
+        raw_min = fminf(raw_min, e->raw_a);
+        raw_max = fmaxf(raw_max, e->raw_a);
+        int rs = cl_sign(e->raw_a);
+        if (rs && last_raw_sign && rs != last_raw_sign) {
+            ++zero_cross;
+        }
+        if (rs) {
+            last_raw_sign = rs;
+        }
+        // Корректирующий знак: ток того же знака, что ошибка (setpoint − угол).
+        int es = cl_sign((e->setpoint - e->balance_pitch) * 10.0f);
+        if (rs && es) {
+            ++signed_n;
+            if (rs == es) {
+                ++corrective;
+            }
+        }
+        if (e->flags & FC_CL_F_PARTIAL) {
+            ++partial;
+        }
+        if (e->flags & FC_CL_F_DENIED) {
+            ++denied;
+        }
+        if (!(e->flags & FC_CL_F_PAIR)) {
+            continue;
+        }
+        if (!first_pair_us) {
+            first_pair_us = e->t_us;
+        }
+        last_pair_us = e->t_us;
+        skews[pairs] = e->skew_us;
+        gates[pairs] = e->gate_us;
+        ++pairs;
+        skew_sum += e->skew_us;
+        gate_sum += e->gate_us;
+        skew_max = e->skew_us > skew_max ? e->skew_us : skew_max;
+        gate_max = e->gate_us > gate_max ? e->gate_us : gate_max;
+        float d = e->delivered_a;
+        del_min = fminf(del_min, d);
+        del_max = fmaxf(del_max, d);
+        if (have_prev && fabsf(d - prev_del) > slew_max) {
+            slew_max = fabsf(d - prev_del);
+        }
+        prev_del = d;
+        have_prev = true;
+        int s = cl_sign(d);
+        if (s && last_sign && s != last_sign) {
+            ++reversals;
+        }
+        if (s) {
+            last_sign = s;
+        }
+        if (fabsf(d) >= FC_CL_ENVELOPE_A - CL_SAT_EPS_A) {
+            ++sat;
+            ++sat_run;
+            sat_run_max = sat_run > sat_run_max ? sat_run : sat_run_max;
+            int ss = d > 0 ? 1 : -1;
+            // Упор в противоположный край не позднее чем через 3 цикла — «реле».
+            if (last_sat_sign && ss != last_sat_sign && pairs - last_sat_idx <= 3u) {
+                ++rail;
+            }
+            last_sat_sign = ss;
+            last_sat_idx = pairs;
+        } else {
+            sat_run = 0;
+        }
+    }
+    // Перцентиль по отсортированной копии: записей не больше 300.
+    for (uint32_t i = 1; i < pairs; ++i) {
+        for (uint32_t j = i; j > 0 && skews[j - 1] > skews[j]; --j) {
+            uint16_t t = skews[j];
+            skews[j] = skews[j - 1];
+            skews[j - 1] = t;
+        }
+        for (uint32_t j = i; j > 0 && gates[j - 1] > gates[j]; --j) {
+            uint16_t t = gates[j];
+            gates[j] = gates[j - 1];
+            gates[j - 1] = t;
+        }
+    }
+    uint32_t p99i = pairs ? (pairs * 99u + 99u) / 100u - 1u : 0;
+
+    printf("\nЦИКЛЫ      в окне %lu, пар целиком %lu, частичных %lu, отказов координатора %lu; "
+           "потеряно записей %lu\n",
+           (unsigned long) cycles, (unsigned long) pairs, (unsigned long) partial,
+           (unsigned long) denied, (unsigned long) li.dropped);
+    if (pairs) {
+        printf("           первая пара %+.2f мс, последняя %+.2f мс от старта; срок %+.2f мс\n",
+               (double) ((int64_t) first_pair_us - t0) / 1000.0,
+               (double) ((int64_t) last_pair_us - t0) / 1000.0,
+               (double) ((int64_t) CL.deadline_us - t0) / 1000.0);
+    }
+    printf("ПОСЛЕ СРОКА запросов Refloat %lu, ушло пар %lu (обязано быть 0); гейт отверг по сроку %llu\n",
+           (unsigned long) after_req, (unsigned long) after_pairs,
+           (unsigned long long) CL.gb.rejected_deadline);
+    printf("           супервизор через %llu мкс после срока: %s; гейт %s\n",
+           (unsigned long long) (CL.sup_after_deadline_at_us - CL.deadline_us),
+           fc_supervisor_state_name(CL.sup_after_deadline),
+           CL.gate_active_after_deadline ? "ЕЩЁ ВЗВЕДЁН" : "отозван");
+    printf("ANGLE      начальный %+.3f°, конечный %+.3f°, max |угол| %.3f°; скорость начальная "
+           "%+.2f, max |скорость| %.2f °/с\n",
+           (double) pitch0, (double) pitch_last, (double) pitch_absmax, (double) rate0,
+           (double) rate_absmax);
+    if (cycles) {
+        printf("CURRENT    raw %+.3f … %+.3f А; выдано %+.3f … %+.3f А (оболочка ±%.2f)\n",
+               (double) raw_min, (double) raw_max, pairs ? (double) del_min : 0.0,
+               pairs ? (double) del_max : 0.0, (double) FC_CL_ENVELOPE_A);
+    }
+    printf("           упор в оболочку %lu из %lu (%.1f %%), самая длинная серия %lu; зажато "
+           "гейтом %llu\n",
+           (unsigned long) sat, (unsigned long) pairs,
+           pairs ? 100.0 * (double) sat / (double) pairs : 0.0, (unsigned long) sat_run_max,
+           (unsigned long long) CL.gb.clamped);
+    printf("           смен знака выданного %lu, переходов raw через 0 %lu, «край-в-край» %lu, "
+           "наибольший шаг %.3f А/цикл\n",
+           (unsigned long) reversals, (unsigned long) zero_cross, (unsigned long) rail,
+           (double) slew_max);
+    printf("           корректирующий знак в %lu из %lu циклов со значимым током и ошибкой\n",
+           (unsigned long) corrective, (unsigned long) signed_n);
+    if (pairs) {
+        printf("PAIR       разбег mean %.1f, p99 %u, max %lu мкс (граница %u); стоимость гейта "
+               "mean %.1f, p99 %u, max %lu мкс\n",
+               (double) skew_sum / (double) pairs, (unsigned) skews[p99i],
+               (unsigned long) skew_max, (unsigned) FC_DUAL_MAX_SKEW_US,
+               (double) gate_sum / (double) pairs, (unsigned) gates[p99i],
+               (unsigned long) gate_max);
+    }
+    printf("           наибольший интервал между запросами Refloat %lu мкс (номинал 2000)\n",
+           (unsigned long) gap_max);
+
+    static FcStatusSample cap[FC_STATUS_CAPTURE_MAX];
+    uint32_t cn = fc_can_status_capture(cap, FC_STATUS_CAPTURE_MAX);
+    printf("\nSTATUS     %lu кадров (время от старта; ток STATUS без знака, ERPM 100 у нуля — "
+           "шум):\n", (unsigned long) cn);
+    for (uint32_t i = 0; i < cn; ++i) {
+        printf("  %+8.2f мс  %u  скважность %+.3f  ERPM %+ld  ток %.1f А\n",
+               (double) ((int64_t) cap[i].t_us - t0) / 1000.0, cap[i].node, (double) cap[i].duty,
+               (long) cap[i].erpm, (double) cap[i].current_a);
+    }
+    for (int k = 0; k < 2; ++k) {
+        uint8_t id = k ? 100 : 118;
+        if (CL.pre[k].values_ok && CL.post[k].values_ok) {
+            long d = (long) (CL.post[k].v.tachometer - CL.pre[k].v.tachometer);
+            printf("TACH       %u: %ld -> %ld, приращение %+ld (%s); отказ после: %s\n", id,
+                   (long) CL.pre[k].v.tachometer, (long) CL.post[k].v.tachometer, d,
+                   d > 0 ? "к носу" : (d < 0 ? "к хвосту" : "не сдвинулось"),
+                   CL.post[k].v.has_fault ? fc_vesc_fault_name(CL.post[k].v.fault_code) : "?");
+        } else {
+            printf("TACH       %u: телеметрия до или после не получена\n", id);
+        }
+    }
+
+    printf("REALTIME  ");
+    for (unsigned i = 0; i < CL_RT_N; ++i) {
+        static FcTimingStats t;
+        t = fc_timing_get(CL_RT[i]);
+        printf(" %s missed +%" PRIu32 ";", t.name, CL.missed1[i] - CL.missed0[i]);
+    }
+    printf("\n");
+    for (unsigned i = 0; i < 3; ++i) {
+        static FcTimingStats t;
+        t = fc_timing_get(CL_RT[i]);
+        if (t.exec_samples) {
+            printf("           %-14s собств. CPU mean %.1f / max %lu мкс; период p99 %lu, max %lu "
+                   "мкс (с timing-reset)\n",
+                   t.name, (double) t.net_sum_us / (double) t.exec_samples,
+                   (unsigned long) t.net_max_us, (unsigned long) t.p99_us,
+                   (unsigned long) t.max_period_us);
+        }
+    }
+    printf("IMU        циклов не OK в окне %lu; подозрений на пропуск семпла +%llu; политика "
+           "сейчас %s\n",
+           (unsigned long) imu_bad, (unsigned long long) (CL.imu_skips1 - CL.imu_skips0),
+           fc_imu_permit_name(fc_supervisor_last_imu_permit()));
+    printf("CAN        ошибок шины +%llu, BUS_OFF +%llu\n",
+           (unsigned long long) (CL.can_err1 - CL.can_err0),
+           (unsigned long long) (CL.bus_off1 - CL.bus_off0));
+    printf("FLASH      записей от ARMED до снятия: %llu (обязано быть 0)\n",
+           (unsigned long long) (CL.flash_exec_disarm - CL.flash_exec_armed));
+    cl_print_stacks();
+    printf("SAFETY     супервизор %s, координатор %s, гейт %s, имитация датчиков %s\n",
+           fc_supervisor_state_name(fc_supervisor_state()),
+           fc_motor_experiment_armed() ? "ВООРУЖЁН" : "обезоружен",
+           fc_motor_gate_burst_stats().active ? "ВЗВЕДЁН" : "закрыт",
+           fc_adc_simulation_active() ? "ВКЛЮЧЕНА" : "выключена");
+    if (!dry) {
+        CL.report_pending = false;
+        if (pairs && after_pairs == 0 && partial == 0) {
+            CL.last_ok_ms = CL.ms;
+        }
+    } else if (CL.abort_reason) {
+        CL.report_pending = false;
+    }
+}
+#endif // FC_CLOSED_LOOP_AVAILABLE
 
 #endif // FC_MOTOR_BACKEND_AVAILABLE
 
@@ -2536,6 +3450,20 @@ static void dispatch(const char *line) {
         cmd_oneshot_fire();
     } else if (!strcmp(line, "motor-oneshot-report")) {
         cmd_oneshot_report();
+#if FC_CLOSED_LOOP_AVAILABLE
+    } else if (!strcmp(line, "cl-ready")) {
+        cmd_cl_ready();
+    } else if (!strncmp(line, "cl-burst", 8) && (line[8] == 0 || line[8] == ' ')) {
+        cmd_cl_burst(line[8] ? line + 9 : NULL);
+    } else if (!strcmp(line, "cl-report")) {
+        cmd_cl_report();
+    } else if (!strcmp(line, "cl-path-probe")) {
+        cmd_cl_path_probe();
+    } else if (!strcmp(line, "cl-loop-dry")) {
+        cmd_cl_loop_dry();
+    } else if (!strncmp(line, "cl-tx-probe", 11) && (line[11] == 0 || line[11] == ' ')) {
+        cmd_cl_tx_probe(line[11] ? line + 12 : NULL);
+#endif
     } else if (!strcmp(line, "motor-arm")) {
         cmd_motor_arm();
     } else if (!strcmp(line, "motor-disarm")) {

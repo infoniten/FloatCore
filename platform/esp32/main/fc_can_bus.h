@@ -157,6 +157,14 @@ typedef struct {
     uint64_t build_rejected;  // белый список отверг запрос
     uint32_t last_rtt_us;
     uint32_t max_rtt_us;
+    // Длительность САМОГО вызова twai_transmit (разбор пропусков v0.9K): тот
+    // же вызов, что у моторного кадра, но без тяги.
+    uint32_t tx_call_n;
+    uint32_t tx_call_last_us;
+    uint32_t tx_call_min_us;
+    uint32_t tx_call_max_us;
+    uint64_t tx_call_sum_us;
+    int tx_call_core;
 } FcCanDiagStats;
 
 /**

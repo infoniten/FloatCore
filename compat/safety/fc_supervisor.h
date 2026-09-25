@@ -53,6 +53,10 @@ typedef struct {
     bool imu_healthy;        // health-слой raw IMU не в ошибке
     bool watchdog_healthy;   // TWDT не срабатывал
     bool footpad_engaged;    // доска активирована (не отказ, но не даёт READY)
+    // Нажатие датчиков ног — ИМИТАЦИЯ стенда, а не человек (v0.9K). Только при
+    // этом признаке ARMED и RUNNING переживают нажатие: Refloat подаёт ток
+    // лишь при нажатых датчиках. Настоящее нажатие снимает их, как и READY.
+    bool footpad_simulated;
 
     // Ориентация датчика откалибрована и запись валидна (v0.6E).
     //
@@ -157,6 +161,13 @@ void fc_supervisor_self_test_result(bool passed, uint64_t now_us);
 /** Запрос перехода DISARMED -> READY. Возвращает false, если условия не выполнены. */
 bool fc_supervisor_request_ready(uint64_t now_us);
 
+// Замкнутый контур (ТЗ v0.9K). В сборке без FLOATCORE_REFLOAT_REAL_MOTOR_LOOP
+// обе функции отказывают всегда.
+#define FC_SUP_BURST_MAX_US 500000u  // v0.9K §18: не больше 500 мс непрерывного контура
+bool fc_supervisor_request_closed_loop_ready(uint64_t now_us); // READY -> ARMED
+bool fc_supervisor_begin_burst(uint64_t duration_us, uint64_t now_us); // ARMED -> RUNNING
+uint64_t fc_supervisor_burst_deadline_us(void);
+
 /** READY -> DISARMED. Всегда разрешён: снятие готовности безопасно. */
 void fc_supervisor_disarm(uint64_t now_us);
 
@@ -171,6 +182,7 @@ void fc_supervisor_report_config_valid(bool valid, uint64_t now_us);
 void fc_supervisor_report_platform_ready(bool ready, uint64_t now_us);
 void fc_supervisor_report_watchdog(bool healthy, uint64_t now_us);
 void fc_supervisor_report_footpad(bool engaged, uint64_t now_us);
+void fc_supervisor_report_footpad_simulated(bool simulated, uint64_t now_us);
 void fc_supervisor_report_calibration_valid(bool valid, uint64_t now_us);
 
 /** Немедленный отказ с указанной причиной. */

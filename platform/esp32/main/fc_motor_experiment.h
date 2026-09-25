@@ -33,6 +33,18 @@
 // экспериментом, и смешивать эти две цели в одной команде нельзя.
 #define FC_MOTOR_ONESHOT_MAX_A 0.5f
 
+#if FC_CLOSED_LOOP_AVAILABLE
+// Оболочка замкнутого контура (ТЗ v0.9K §4): симметричная, НИЖЕ предела ESC
+// (+5/−3 А). Зажимает гейт; координатор держит тот же предел, но отвергает, а
+// не зажимает, — сработать он может только при ошибке в гейте.
+#define FC_CL_ENVELOPE_A 1.5f
+// Санитарная проверка гейта в сборке контура: модуль предела ESC. Запрос
+// Refloat выше оболочки, но в пределах ESC — законная команда, её надо
+// ЗАЖАТЬ, а не отвергнуть; выше предела ESC Refloat прислать не может, и
+// такое значение — разрушенное.
+#define FC_CL_REQUEST_SANITY_A 5.0f
+#endif
+
 // Темп источника. Совпадает с темпом контура: политика сторожевого таймера
 // v0.7C построена вокруг 500 Гц, и менять его для теста значило бы проверять
 // не ту систему.
@@ -128,6 +140,63 @@ bool fc_motor_experiment_oneshot(float amps, uint32_t *gate_verdict);
 
 void fc_motor_experiment_inject(uint32_t mask);
 uint32_t fc_motor_experiment_injected(void);
+
+#if FC_CLOSED_LOOP_AVAILABLE
+/** Refloat попросил тягу сейчас: для проверки свежести команды в координаторе. */
+void fc_motor_experiment_note_command(uint64_t now_us);
+
+// Лёгкий след последней пары для журнала каждого цикла: без перцентилей и без
+// копирования всей статистики, потому что читается из потока Refloat.
+typedef struct {
+    uint64_t tx_us[2];
+    float tx_amps[2];
+    bool tx_ok[2];
+    uint32_t skew_us;
+    uint32_t deny_mask;
+    uint64_t pairs_sent;
+    uint64_t pairs_partial;
+    uint64_t pairs_denied;
+} FcMotorTxTrace;
+
+void fc_motor_experiment_tx_trace(FcMotorTxTrace *out);
+
+// Разложение стоимости пути передачи БЕЗ передачи (разбор пропусков v0.9K).
+// Каждая часть повторяется n раз; min — стоимость без вытеснения.
+typedef struct {
+    uint32_t min_us, p50_us, max_us;
+} FcProbeStat;
+
+enum {
+    FC_PROBE_CAN_HEALTH = 0,  // fc_can_bus_health(): копия таблицы здоровья
+    FC_PROBE_CAN_STATS,       // fc_can_bus_stats(): статус TWAI + копия статистики
+    FC_PROBE_TWAI_STATUS,     // twai_get_status_info() отдельно
+    FC_PROBE_SUP_STATUS,      // fc_supervisor_status()
+    FC_PROBE_GATHER,          // сбор входов координатора целиком
+    FC_PROBE_PLAN,            // fc_dual_motor_plan() по готовым входам
+    FC_PROBE_BUILD_FRAME,     // сборка одного кадра тока (без передачи)
+    FC_PROBE_GATE_REJECT,     // запрос Refloat в гейт при DISARMED: отвергается до backend-а
+    FC_PROBE_COUNT
+};
+
+typedef struct {
+    FcProbeStat st[FC_PROBE_COUNT];
+    uint32_t n;
+    uint32_t health_bytes, stats_bytes, sup_bytes;
+    int core;
+} FcPathProbe;
+
+#define FC_PROBE_MAX_N 500u
+
+/**
+ * Холостой сбор входов и план координатора из контура, БЕЗ исполнения.
+ * Только при обезоруженном координаторе: план тогда заведомо отказ. Возвращает
+ * длительность в мкс, либо 0, если вызов отвергнут.
+ */
+uint32_t fc_motor_experiment_dry_plan_us(void);
+
+/** Отказывает, если координатор вооружён: проба не должна идти рядом с тягой. */
+bool fc_motor_experiment_path_probe(FcPathProbe *out, uint32_t n);
+#endif
 
 FcMotorExpStats fc_motor_experiment_stats(void);
 void fc_motor_experiment_reset_stats(void);
